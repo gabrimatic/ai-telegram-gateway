@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke
+        run: npm run smoke
+
+      - name: Audit runtime deps
+        run: npm audit --omit=dev
+
+      - name: Secret scan
+        run: npm run check:secrets
+
+      - name: Pack dry run
+        run: npm pack --dry-run

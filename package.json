@@ -1,0 +1,66 @@
+{
+  "name": "ai-telegram-gateway",
+  "version": "1.0.0",
+  "description": "A gateway that bridges Telegram messages to AI assistants like Claude CLI",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "smoke": "node ./scripts/ci-smoke.cjs",
+    "check:secrets": "bash ./scripts/check-no-secrets.sh",
+    "check": "./scripts/build-typecheck.sh",
+    "prestart": "npm run build",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "dev:watch": "npm run build && (tsc --watch & node --watch dist/index.js)",
+    "pm2:start": "./scripts/pm2-start.sh",
+    "pm2:restart": "./scripts/pm2-restart.sh",
+    "pm2:status": "./scripts/pm2-status.sh",
+    "pm2:logs": "./scripts/pm2-logs.sh",
+    "e2e": "./scripts/e2e-harness.sh",
+    "check:restart-resilience": "./scripts/restart-resilience.sh",
+    "check:pm2-daemon": "./scripts/pm2-daemon-resilience.sh"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "claude",
+    "ai",
+    "assistant",
+    "gateway",
+    "cli"
+  ],
+  "license": "MIT",
+  "files": [
+    "dist",
+    "src",
+    "config",
+    "scripts",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gabrimatic/ai-telegram-gateway.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gabrimatic/ai-telegram-gateway/issues"
+  },
+  "homepage": "https://github.com/gabrimatic/ai-telegram-gateway#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "grammy": "^1.21.1",
+    "node-cron": "^4.2.1",
+    "openai": "^4.77.0",
+    "telegram-markdown-v2": "^0.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.0"
+  }
+}

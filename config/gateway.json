@@ -1,0 +1,48 @@
+{
+  "debug": false,
+  "aiProvider": "claude-cli",
+  "providerDisplayName": "Claude",
+  "dailyResetHour": 6,
+  "sessionResetIntervalHours": 4,
+  "memoryPath": "~/.claude/memory.md",
+  "logRetentionDays": 7,
+  "healthCheckIntervalMs": 20000,
+  "sessionSummaryPrompt": "Summarize this session: key decisions, outcomes, what to remember for next time. Be concise.",
+  "mcpConfigPath": "./mcp-config.json",
+  "defaultModel": "opus",
+  "maxRetries": 3,
+  "retryBaseDelayMs": 1000,
+  "validResponseRateThreshold": 0.7,
+  "consecutiveFailureThreshold": 3,
+  "enableSystemPrompt": true,
+  "confusionMarkers": [
+    "I don't understand",
+    "Could you clarify",
+    "I'm not sure what you mean",
+    "Can you rephrase",
+    "I'm confused"
+  ],
+  "circuitBreaker": {
+    "failureThreshold": 3,
+    "recoveryTimeoutMs": 30000
+  },
+  "enableTTS": false,
+  "ttsVoice": "marin",
+  "ttsSpeed": 1,
+  "ttsInstructions": "Speak naturally and conversationally, like a friendly assistant. Be warm but not overly enthusiastic.",
+  "alerting": {
+    "enabled": true,
+    "throttleMinutes": 5
+  },
+  "resources": {
+    "memoryWarningPercent": 92,
+    "memoryCriticalPercent": 96,
+    "diskWarningPercent": 90,
+    "diskPath": "~/.claude",
+    "maxFilesStorageMB": 500
+  },
+  "security": {
+    "commandWarningsEnabled": true,
+    "argValidationMode": "moderate"
+  }
+}
