@@ -97,7 +97,7 @@ npm run dev
 
 ### Environment variables
 
-See `.env.example` for the full template. Frequently used values:
+See [`.env.example`](./.env.example) for the full template. Frequently used values:
 
 - Identity and safety:
   - `TG_HOST_LABEL` (default: `local host`)
@@ -120,7 +120,7 @@ See `.env.example` for the full template. Frequently used values:
 
 ### Gateway config file
 
-Main runtime config is `config/gateway.json`.
+Main runtime config is [`config/gateway.json`](./config/gateway.json).
 
 Notable fields:
 
@@ -140,7 +140,7 @@ Notable fields:
 
 ## Command groups
 
-The command list is registered in `src/poller.ts` via `setMyCommands`.
+The command list is registered in [`src/poller.ts`](./src/poller.ts) via `setMyCommands`.
 
 - Session: `/start`, `/help`, `/clear`, `/stats`, `/model`, `/tts`
 - Productivity: `/todo`, `/note`, `/notes`, `/remind`, `/timer`, `/schedule`, `/schedules`
@@ -202,7 +202,7 @@ npm run pm2:logs
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [`LICENSE`](./LICENSE).
 
 ---
 
