@@ -1,151 +1,174 @@
 # AI Telegram Gateway
 
-Telegram bot gateway that bridges incoming Telegram messages to a local AI CLI process and streams responses back.
+Telegram bot gateway that forwards Telegram text, voice, and files to a local AI CLI provider, then streams results back in Telegram.
 
-## Compatibility
+## What this project is for
 
-- macOS is the primary supported platform for this repository.
-- Linux may work for some features, but is not a support target in this release.
-- Some commands are macOS-specific (`/temp`, `/sleep`, `/reboot`, `networkQuality`) and will return command errors on non-macOS systems.
+This project runs as a long-polling daemon on a trusted host machine. It gives you a private Telegram control plane for:
 
-## Security model and trust assumptions
+- AI chat with persistent session context
+- server and process operations
+- shell and file workflows
+- reminders, todos, notes, and scheduled tasks
+- health monitoring and self-healing
 
-- This bot is intended for trusted, admin-controlled environments.
-- Admin-only commands include direct shell execution and system control operations.
-- Allowlist enforcement is the first access gate.
-- Dangerous commands can be globally disabled with `TG_ENABLE_DANGEROUS_COMMANDS=false`.
-- Input validation is moderate by default (`security.argValidationMode=moderate`) and blocks common shell-injection primitives for shell-bound command arguments.
+## Key capabilities
 
-## Dangerous admin commands and deployment posture
+- Multiple AI providers with model routing (`claude-cli` and `codex-cli`)
+- Streaming responses via Telegram message edits
+- Voice input (WhisperKit STT) and optional voice output (OpenAI TTS)
+- 80+ slash commands for productivity, system ops, and monitoring
+- Allowlist and pairing-code access control
+- Circuit breaker, watchdog, analytics, and automatic recovery paths
+- JSON-file persistence under `~/.claude/` (no database)
 
-Dangerous commands are enabled by default to preserve current operational behavior.
+## Platform support
 
-Commands gated by `TG_ENABLE_DANGEROUS_COMMANDS`:
-- `/sh`
-- `/shlong`
-- `/reboot`
-- `/sleep`
+- macOS is the primary supported platform.
+- Linux may work for parts of the feature set, but is not an official support target.
+- Some commands are macOS-specific (`/temp`, `/sleep`, `/reboot`, `networkQuality`) and can fail on non-macOS hosts.
+
+## Security and trust model
+
+This bot is designed for admin-controlled environments. It exposes powerful host operations.
+
+- Allowlist checks are the first access gate.
+- Shell and system control commands exist and should be treated as privileged.
+- Dangerous command paths can be disabled globally with `TG_ENABLE_DANGEROUS_COMMANDS=false`.
+- Argument validation defaults to `security.argValidationMode=moderate`.
+
+Dangerous command surfaces gated by `TG_ENABLE_DANGEROUS_COMMANDS` include:
+
+- `/sh`, `/shlong`
+- `/reboot`, `/sleep`
 - `/git pull`
-- `/brew update`
-- `/brew upgrade`
+- `/brew update`, `/brew upgrade`
 
-Recommended posture for public or shared deployments:
-1. Keep allowlist tight.
+Recommended deployment posture for shared or internet-exposed environments:
+
+1. Keep the allowlist small and explicit.
 2. Restrict admin users to trusted operators only.
-3. Set `TG_ENABLE_DANGEROUS_COMMANDS=false` unless explicitly needed.
-4. Run behind least-privilege OS users where possible.
+3. Set `TG_ENABLE_DANGEROUS_COMMANDS=false` unless needed.
+4. Run the bot with a least-privilege OS user.
 
 ## Quick start
+
+### 1) Clone and install
 
 ```bash
 git clone https://github.com/gabrimatic/ai-telegram-gateway.git
 cd ai-telegram-gateway
 npm install
+```
+
+### 2) Configure environment
+
+```bash
 cp .env.example .env
 ```
 
-Set required environment variables in `.env`:
-- `TELEGRAM_BOT_TOKEN` (required)
-- `OPENAI_API_KEY` (optional, only for TTS)
+Minimum required:
 
-Build and run:
+- `TELEGRAM_BOT_TOKEN` (required)
+- `OPENAI_API_KEY` (optional, only needed for TTS)
+
+### 3) Build and run
 
 ```bash
 npm run build
 npm start
 ```
 
-## Environment variables
+For development:
 
-Core identity and runtime labels:
-- `TG_HOST_LABEL` default: `local host`
-- `TG_ADMIN_NAME` default: empty
-- `TG_BOT_USERNAME` default: empty
-- `TG_PROJECT_PATH_HINT` default: empty
-- `TG_ENABLE_DANGEROUS_COMMANDS` default: `true`
-
-Path and runtime variables (subset):
-- `TG_DATA_DIR`
-- `TG_LOG_DIR`
-- `TG_HEALTH_FILE`
-- `TG_PROJECT_DIR`
-- `TG_PM2_APP_NAME`
-- `TG_MEMORY_FILE`
-- `TG_ALLOWLIST_FILE`
-- `TG_TODOS_FILE`
-- `TG_NOTES_FILE`
-- `TG_REMINDERS_FILE`
-- `TG_PID_FILE`
-- `TG_MCP_CONFIG`
-- `TG_GATEWAY_CONFIG`
-- `TG_WORKING_DIR`
-- `CLAUDE_BIN`
-- `CODEX_BIN`
-- `WHISPERKIT_HOST`
-- `WHISPERKIT_PORT`
-
-See `.env.example` for full templates.
-
-## Gateway config (`config/gateway.json`)
-
-Security section:
-
-```json
-{
-  "security": {
-    "commandWarningsEnabled": true,
-    "argValidationMode": "moderate"
-  }
-}
+```bash
+npm run dev
 ```
 
-- `commandWarningsEnabled`: enables warning lines in help/command UX.
-- `argValidationMode`: `moderate` or `strict` (current implementation defaults to and uses `moderate`).
+## Setup helper script
 
-## Commands
+`setup.sh` provides guided setup on macOS. It can install prerequisites, write `.env`, and optionally start/restart PM2.
 
-The README command list is synchronized with `setMyCommands` in `src/poller.ts`.
+```bash
+./setup.sh --help
+```
 
-Session:
-- `/start`, `/help`, `/clear`, `/stats`, `/model`, `/tts`
+## Runtime configuration
 
-Productivity:
-- `/todo`, `/note`, `/notes`, `/remind`, `/timer`, `/schedule`, `/schedules`
+### Environment variables
 
-Utilities:
-- `/calc`, `/random`, `/pick`, `/uuid`, `/time`, `/date`
+See `.env.example` for the full template. Frequently used values:
 
-Info:
-- `/weather`, `/define`, `/translate`
+- Identity and safety:
+  - `TG_HOST_LABEL` (default: `local host`)
+  - `TG_ADMIN_NAME`
+  - `TG_BOT_USERNAME`
+  - `TG_PROJECT_PATH_HINT`
+  - `TG_ENABLE_DANGEROUS_COMMANDS` (default: `true`)
+- AI binaries:
+  - `CLAUDE_BIN`
+  - `CODEX_BIN`
+- Data and paths:
+  - `TG_DATA_DIR`, `TG_LOG_DIR`
+  - `TG_MEMORY_FILE`, `TG_ALLOWLIST_FILE`
+  - `TG_TODOS_FILE`, `TG_NOTES_FILE`, `TG_REMINDERS_FILE`
+  - `TG_GATEWAY_CONFIG`, `TG_MCP_CONFIG`, `TG_PID_FILE`
+  - `TG_WORKING_DIR`
+- Voice transcription:
+  - `WHISPERKIT_HOST` (default: `localhost`)
+  - `WHISPERKIT_PORT` (default: `50060`)
 
-System info:
-- `/disk`, `/memory`, `/cpu`, `/battery`
+### Gateway config file
 
-Files:
-- `/ls`, `/pwd`, `/cat`, `/find`, `/size`, `/upload`, `/tree`
+Main runtime config is `config/gateway.json`.
 
-Network:
-- `/ping`, `/dns`, `/curl`, `/ports`, `/net`
+Notable fields:
 
-Server management:
-- `/sys`, `/docker`, `/pm2`, `/brew`, `/git`, `/kill`, `/ps`, `/df`, `/top`, `/temp`, `/reboot`, `/sleep`, `/screenshot`, `/deploy`
+- Provider and model defaults:
+  - `aiProvider` (`claude-cli` or `codex-cli`)
+  - `defaultModel` (`haiku`, `opus`, `sonnet`, `codex`)
+  - `providerDisplayName`
+- Reliability:
+  - `circuitBreaker.failureThreshold`
+  - `circuitBreaker.recoveryTimeoutMs`
+  - `maxRetries`, `retryBaseDelayMs`
+- Voice:
+  - `enableTTS`, `ttsVoice`, `ttsSpeed`, `ttsInstructions`
+- Security:
+  - `security.commandWarningsEnabled`
+  - `security.argValidationMode` (`moderate` or `strict`)
 
-Monitoring:
-- `/health`, `/analytics`, `/errors`
+## Command groups
 
-Snippets:
-- `/snippet`, `/snippets`
+The command list is registered in `src/poller.ts` via `setMyCommands`.
 
-Session management:
-- `/session`, `/sessions`, `/context`
+- Session: `/start`, `/help`, `/clear`, `/stats`, `/model`, `/tts`
+- Productivity: `/todo`, `/note`, `/notes`, `/remind`, `/timer`, `/schedule`, `/schedules`
+- Utilities: `/calc`, `/random`, `/pick`, `/uuid`, `/time`, `/date`
+- AI info: `/weather`, `/define`, `/translate`
+- System info: `/disk`, `/memory`, `/cpu`, `/battery`
+- Files: `/ls`, `/pwd`, `/cat`, `/find`, `/size`, `/upload`, `/tree`
+- Network: `/ping`, `/dns`, `/curl`, `/ports`, `/net`
+- Server management: `/sys`, `/docker`, `/pm2`, `/brew`, `/git`, `/kill`, `/ps`, `/df`, `/top`, `/temp`, `/reboot`, `/sleep`, `/screenshot`, `/deploy`
+- Monitoring: `/health`, `/analytics`, `/errors`
+- Snippets: `/snippet`, `/snippets`
+- Session management: `/session`, `/sessions`, `/context`
+- Notifications: `/quiet`, `/dnd`
+- Meta: `/id`, `/version`, `/uptime`
 
-Notifications:
-- `/quiet`, `/dnd`
+## Data storage
 
-Meta:
-- `/id`, `/version`, `/uptime`
+Persistent state is file-based under `~/.claude/`, including:
 
-## Development and checks
+- allowlist and pairing data
+- todos, notes, reminders
+- schedules and snippets
+- notification preferences
+- daily analytics snapshots
+
+No database is required.
+
+## Development checks
 
 ```bash
 npm run typecheck
@@ -156,7 +179,8 @@ npm run check:restart-resilience
 npm run check:pm2-daemon
 ```
 
-CI enforces:
+Current CI checks include:
+
 - `npm ci`
 - `npm run typecheck`
 - `npm run build`
@@ -165,9 +189,16 @@ CI enforces:
 - secret-pattern scan
 - `npm pack --dry-run`
 
-## Packaging
+## PM2 operations
 
-`package.json` uses a whitelist `files` field to control publish artifacts.
+Project scripts:
+
+```bash
+npm run pm2:start
+npm run pm2:restart
+npm run pm2:status
+npm run pm2:logs
+```
 
 ## License
 
