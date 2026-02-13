@@ -58,5 +58,11 @@
     "idleTtlMinutes": 30,
     "replyContextMaxChars": 500,
     "enableReplyContextInjection": true
+  },
+  "responseActions": {
+    "enabled": true,
+    "decisionTimeoutMs": 5000,
+    "maxPromptChars": 2000,
+    "maxResponseChars": 4000
   }
 }

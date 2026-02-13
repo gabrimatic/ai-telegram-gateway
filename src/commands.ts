@@ -78,6 +78,10 @@ import {
 import { env } from "./env";
 import { buildScheduleHomeView } from "./schedule-ui";
 import { getConversationKeyFromContext } from "./conversation-context";
+import {
+  executeTelegramApiCall,
+  parseTelegramApiPayload,
+} from "./telegram-api-executor";
 
 const DANGEROUS_COMMANDS = new Set(["sh", "reboot"]);
 const ADMIN_ONLY_COMMANDS = new Set([
@@ -90,6 +94,7 @@ const ADMIN_ONLY_COMMANDS = new Set([
   "errors",
   "find",
   "git",
+  "group",
   "health",
   "sentinel",
   "kill",
@@ -103,7 +108,9 @@ const ADMIN_ONLY_COMMANDS = new Set([
   "sh",
   "size",
   "temp",
+  "tg",
   "top",
+  "topic",
 ]);
 
 function dangerousCommandDisabledMessage(): string {
@@ -125,6 +132,66 @@ function buildPrivateQuickReplyKeyboard() {
     resize_keyboard: true,
     is_persistent: true,
     input_field_placeholder: "Ask me anything or tap a shortcut",
+  };
+}
+
+type TopicMessageContext = Context["msg"] & {
+  message_thread_id?: number;
+};
+
+function getCurrentThreadId(ctx: Context): number | null {
+  const msg = ctx.msg as TopicMessageContext | undefined;
+  if (typeof msg?.message_thread_id === "number" && msg.message_thread_id > 0) {
+    return msg.message_thread_id;
+  }
+  return null;
+}
+
+function parseThreadId(value: string | undefined): number | null {
+  if (!value) return null;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed;
+}
+
+async function runTelegramCommandCall(
+  ctx: Context,
+  userId: string,
+  method: string,
+  payload: Record<string, unknown>
+): Promise<{ success: boolean; message: string }> {
+  const result = await executeTelegramApiCall(ctx.api, {
+    method,
+    payload,
+  }, {
+    callerType: "command",
+    userId,
+    isAdmin: true,
+    chatId: payload.chat_id as string | number | undefined,
+  });
+
+  if (result.success) {
+    return {
+      success: true,
+      message: `✅ ${result.summary}`,
+    };
+  }
+
+  if (result.description === "unknown_method") {
+    return {
+      success: false,
+      message: `Unknown Telegram method: ${method}`,
+    };
+  }
+
+  const details = result.errorCode
+    ? `${result.errorCode} ${result.description ?? ""}`.trim()
+    : result.description || "request failed";
+  return {
+    success: false,
+    message: `❌ ${method} failed: ${details}`,
   };
 }
 
@@ -386,6 +453,7 @@ export function buildHelpText(options: {
 
   if (options.isAdmin) {
     lines.push("/session /sentinel");
+    lines.push("/topic /group /tg");
     lines.push("");
     lines.push("\uD83D\uDDA5 *SERVER (ADMIN)*");
     lines.push("/pm2 /git /net /sh /ps /kill /top /reboot");
@@ -796,6 +864,274 @@ export async function handleCommand(
       await ctx.replyWithChatAction("typing");
       const prompt = `Translate the following text to ${targetLang}. Only provide the translation, nothing else:\n"${text}"`;
       return await forwardToClaude(ctx, prompt);
+    }
+
+    case "tg": {
+      const trimmed = args.trim();
+      if (!trimmed) {
+        await ctx.reply("Usage: `/tg <method> <json_payload>`\nExample: `/tg createForumTopic {\"chat_id\":-100123,\"name\":\"Ops\"}`", { parse_mode: "Markdown" });
+        return true;
+      }
+
+      const firstSpace = trimmed.indexOf(" ");
+      if (firstSpace <= 0) {
+        await ctx.reply("Usage: `/tg <method> <json_payload>`", { parse_mode: "Markdown" });
+        return true;
+      }
+
+      const method = trimmed.slice(0, firstSpace).trim();
+      const payloadRaw = trimmed.slice(firstSpace + 1).trim();
+      const parsed = parseTelegramApiPayload(payloadRaw);
+      if (!parsed.ok || !parsed.payload) {
+        await ctx.reply(`Invalid JSON payload: ${parsed.error}`);
+        return true;
+      }
+
+      const execution = await runTelegramCommandCall(ctx, userId!, method, parsed.payload);
+      await ctx.reply(execution.message);
+      return true;
+    }
+
+    case "topic": {
+      const parts = args.trim().split(/\s+/).filter(Boolean);
+      const sub = parts[0]?.toLowerCase();
+      const currentThreadId = getCurrentThreadId(ctx);
+      const chatId = ctx.chat?.id;
+      if (!chatId) {
+        await ctx.reply("This command requires an active chat.");
+        return true;
+      }
+
+      if (!sub) {
+        await ctx.reply(
+          "Usage:\n" +
+          "`/topic create <name>`\n" +
+          "`/topic edit <thread_id> <new_name>`\n" +
+          "`/topic close [thread_id]`\n" +
+          "`/topic reopen [thread_id]`\n" +
+          "`/topic delete [thread_id]`\n" +
+          "`/topic unpinall [thread_id]`\n" +
+          "`/topic icons`\n" +
+          "`/topic general rename <name>`\n" +
+          "`/topic general hide|unhide|close|reopen`",
+          { parse_mode: "Markdown" }
+        );
+        return true;
+      }
+
+      if (sub === "icons") {
+        const execution = await runTelegramCommandCall(ctx, userId!, "getForumTopicIconStickers", {});
+        await ctx.reply(execution.message);
+        return true;
+      }
+
+      if (sub === "create") {
+        const name = args.trim().replace(/^create\s+/i, "").trim();
+        if (!name) {
+          await ctx.reply("Usage: `/topic create <name>`", { parse_mode: "Markdown" });
+          return true;
+        }
+        const execution = await runTelegramCommandCall(ctx, userId!, "createForumTopic", {
+          chat_id: chatId,
+          name,
+        });
+        await ctx.reply(execution.message);
+        return true;
+      }
+
+      if (sub === "general") {
+        const action = parts[1]?.toLowerCase();
+        if (!action) {
+          await ctx.reply("Usage: `/topic general rename <name>` or `/topic general hide|unhide|close|reopen`", { parse_mode: "Markdown" });
+          return true;
+        }
+
+        if (action === "rename") {
+          const name = args.trim().replace(/^general\s+rename\s+/i, "").trim();
+          if (!name) {
+            await ctx.reply("Usage: `/topic general rename <name>`", { parse_mode: "Markdown" });
+            return true;
+          }
+          const execution = await runTelegramCommandCall(ctx, userId!, "editGeneralForumTopic", {
+            chat_id: chatId,
+            name,
+          });
+          await ctx.reply(execution.message);
+          return true;
+        }
+
+        const generalMethod: Record<string, string> = {
+          hide: "hideGeneralForumTopic",
+          unhide: "unhideGeneralForumTopic",
+          close: "closeGeneralForumTopic",
+          reopen: "reopenGeneralForumTopic",
+        };
+        const method = generalMethod[action];
+        if (!method) {
+          await ctx.reply("Usage: `/topic general hide|unhide|close|reopen`", { parse_mode: "Markdown" });
+          return true;
+        }
+        const execution = await runTelegramCommandCall(ctx, userId!, method, { chat_id: chatId });
+        await ctx.reply(execution.message);
+        return true;
+      }
+
+      const resolveThreadId = (argIndex: number): number | null => {
+        const explicit = parseThreadId(parts[argIndex]);
+        if (explicit) return explicit;
+        return currentThreadId;
+      };
+
+      if (sub === "edit") {
+        const threadId = parseThreadId(parts[1]);
+        const newName = args.trim().replace(/^edit\s+\d+\s+/i, "").trim();
+        if (!threadId || !newName) {
+          await ctx.reply("Usage: `/topic edit <thread_id> <new_name>`", { parse_mode: "Markdown" });
+          return true;
+        }
+        const execution = await runTelegramCommandCall(ctx, userId!, "editForumTopic", {
+          chat_id: chatId,
+          message_thread_id: threadId,
+          name: newName,
+        });
+        await ctx.reply(execution.message);
+        return true;
+      }
+
+      const operationMap: Record<string, string> = {
+        close: "closeForumTopic",
+        reopen: "reopenForumTopic",
+        delete: "deleteForumTopic",
+        unpinall: "unpinAllForumTopicMessages",
+      };
+      const method = operationMap[sub];
+      if (!method) {
+        await ctx.reply("Unknown topic action. Use `/topic` for usage.", { parse_mode: "Markdown" });
+        return true;
+      }
+
+      const threadId = resolveThreadId(1);
+      if (!threadId) {
+        await ctx.reply("Missing thread id. Provide `<thread_id>` or run this inside a topic.", { parse_mode: "Markdown" });
+        return true;
+      }
+
+      const execution = await runTelegramCommandCall(ctx, userId!, method, {
+        chat_id: chatId,
+        message_thread_id: threadId,
+      });
+      await ctx.reply(execution.message);
+      return true;
+    }
+
+    case "group": {
+      const parts = args.trim().split(/\s+/).filter(Boolean);
+      const sub = parts[0]?.toLowerCase();
+      const chatId = ctx.chat?.id;
+      if (!chatId) {
+        await ctx.reply("This command requires an active chat.");
+        return true;
+      }
+
+      if (!sub || sub === "status") {
+        try {
+          const chat = await ctx.api.getChat(chatId);
+          const me = await ctx.api.getMe();
+          const member = await ctx.api.getChatMember(chatId, me.id);
+          const rights = member as unknown as Record<string, unknown>;
+          const lines = [
+            `Chat: ${chat.title || chatId}`,
+            `Type: ${chat.type}`,
+            `Bot status: ${member.status}`,
+            `can_manage_topics: ${rights.can_manage_topics === true ? "yes" : "no"}`,
+            `can_change_info: ${rights.can_change_info === true ? "yes" : "no"}`,
+            `can_restrict_members: ${rights.can_restrict_members === true ? "yes" : "no"}`,
+            `can_delete_messages: ${rights.can_delete_messages === true ? "yes" : "no"}`,
+            `can_pin_messages: ${rights.can_pin_messages === true ? "yes" : "no"}`,
+          ];
+          await ctx.reply(lines.join("\n"));
+        } catch (err) {
+          await ctx.reply(`Failed to read group status: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return true;
+      }
+
+      if (sub === "title") {
+        const title = args.trim().replace(/^title\s+/i, "").trim();
+        if (!title) {
+          await ctx.reply("Usage: `/group title <text>`", { parse_mode: "Markdown" });
+          return true;
+        }
+        const execution = await runTelegramCommandCall(ctx, userId!, "setChatTitle", {
+          chat_id: chatId,
+          title,
+        });
+        await ctx.reply(execution.message);
+        return true;
+      }
+
+      if (sub === "description") {
+        const description = args.trim().replace(/^description\s+/i, "").trim();
+        if (!description) {
+          await ctx.reply("Usage: `/group description <text>`", { parse_mode: "Markdown" });
+          return true;
+        }
+        const execution = await runTelegramCommandCall(ctx, userId!, "setChatDescription", {
+          chat_id: chatId,
+          description,
+        });
+        await ctx.reply(execution.message);
+        return true;
+      }
+
+      if (sub === "lock") {
+        const execution = await runTelegramCommandCall(ctx, userId!, "setChatPermissions", {
+          chat_id: chatId,
+          permissions: {
+            can_send_messages: false,
+            can_send_audios: false,
+            can_send_documents: false,
+            can_send_photos: false,
+            can_send_videos: false,
+            can_send_video_notes: false,
+            can_send_voice_notes: false,
+            can_send_polls: false,
+            can_send_other_messages: false,
+            can_add_web_page_previews: false,
+            can_change_info: false,
+            can_invite_users: false,
+            can_pin_messages: false,
+          },
+        });
+        await ctx.reply(execution.message);
+        return true;
+      }
+
+      if (sub === "unlock") {
+        const execution = await runTelegramCommandCall(ctx, userId!, "setChatPermissions", {
+          chat_id: chatId,
+          permissions: {
+            can_send_messages: true,
+            can_send_audios: true,
+            can_send_documents: true,
+            can_send_photos: true,
+            can_send_videos: true,
+            can_send_video_notes: true,
+            can_send_voice_notes: true,
+            can_send_polls: true,
+            can_send_other_messages: true,
+            can_add_web_page_previews: true,
+            can_change_info: false,
+            can_invite_users: true,
+            can_pin_messages: false,
+          },
+        });
+        await ctx.reply(execution.message);
+        return true;
+      }
+
+      await ctx.reply("Usage: `/group status|title|description|lock|unlock`", { parse_mode: "Markdown" });
+      return true;
     }
 
     // ============ SYSTEM INFO COMMANDS ============

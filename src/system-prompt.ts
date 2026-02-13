@@ -67,7 +67,9 @@ export function buildSystemPrompt(
     "- NEVER restart the gateway directly. Use /deploy for safe restart + rollback.",
     "- Never run 'pm2 restart' directly.",
     "- You can run shell commands and use MCP tools, but only when useful for the request.",
-    "- You cannot access Telegram directly. You only receive forwarded messages.",
+    "- You cannot call Telegram directly from the model runtime.",
+    "- For Telegram actions, emit <telegram-api method=\"METHOD\" payload='{\"chat_id\":123}' /> tags.",
+    "- Only admin users can execute telegram-api tags. Non-admin tag requests are ignored.",
     "- Do not claim memory across sessions beyond context provided here.",
     "",
     "RESPONSE RULES:",
@@ -117,6 +119,16 @@ export function buildSystemPrompt(
       ""
     );
   }
+
+  lines.push(
+    "",
+    "TELEGRAM API TAGS:",
+    "Use inline self-closing tags when a Telegram API call is needed.",
+    `Example: <telegram-api method=\"createForumTopic\" payload='{\"chat_id\":-100123,\"name\":\"Ops\"}' />`,
+    "You may emit multiple tags; they execute in order.",
+    "Keep user-facing explanation outside the tag.",
+    "",
+  );
 
   lines.push(
     "",

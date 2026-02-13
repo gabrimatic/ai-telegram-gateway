@@ -1,11 +1,12 @@
 import { InlineKeyboard } from "grammy";
 
-type ActionName = "regen" | "short" | "deep";
+export type ActionName = "regen" | "short" | "deep";
 
-interface ActionContext {
+export interface ActionContext {
   userId: string;
   prompt: string;
   responseContext?: string;
+  availableActions?: ActionName[];
   createdAt: number;
 }
 
@@ -90,6 +91,12 @@ export function getLatestActionContextForUser(userId: string): ActionContext | u
   return ctx;
 }
 
+export function setActionContextAvailableActions(token: string, actions: ActionName[]): void {
+  const ctx = getActionContext(token);
+  if (!ctx) return;
+  ctx.availableActions = [...actions];
+}
+
 export function buildActionPrompt(action: ActionName, basePrompt: string): string {
   switch (action) {
     case "short":
@@ -119,21 +126,24 @@ export function buildActionPrompt(action: ActionName, basePrompt: string): strin
 
 export function buildActionKeyboard(
   token: string,
-  options?: { includePromptActions?: boolean }
+  options?: { actions?: ActionName[]; includeContext?: boolean }
 ): InlineKeyboard {
-  const includePromptActions = options?.includePromptActions ?? true;
+  const actions = options?.actions ?? ["regen", "short", "deep"];
+  const includeContext = options?.includeContext ?? true;
   const keyboard = new InlineKeyboard();
+  const hasAction = (name: ActionName): boolean => actions.includes(name);
 
-  if (includePromptActions) {
-    keyboard
-      .text("\u{1F501} Again", `ai_regen_${token}`)
-      .text("\u2702\uFE0F Shorter", `ai_short_${token}`)
-      .row()
-      .text("\u{1F9E0} Deeper", `ai_deep_${token}`)
-      .text("\u2139\uFE0F Context", `ai_ctx_${token}`);
-    return keyboard;
+  if (hasAction("regen")) {
+    keyboard.text("\u{1F501} Again", `ai_regen_${token}`);
   }
-
-  keyboard.text("\u2139\uFE0F Context", `ai_ctx_${token}`);
+  if (hasAction("short")) {
+    keyboard.text("\u2702\uFE0F Shorter", `ai_short_${token}`);
+  }
+  if (hasAction("deep")) {
+    keyboard.text("\u{1F9E0} Deeper", `ai_deep_${token}`);
+  }
+  if (includeContext) {
+    keyboard.text("\u2139\uFE0F Context", `ai_ctx_${token}`);
+  }
   return keyboard;
 }

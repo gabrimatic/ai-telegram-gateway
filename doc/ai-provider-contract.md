@@ -24,6 +24,50 @@ Shared guarantees:
 - Provider-level circuit breakers protect against repeated failures.
 - Timeout failures are surfaced as normal failed responses, not thrown to the poller.
 - Providers may ignore `contextKey` when they do not support true context sessions.
+- Providers may return structured gateway tags in plain text. The gateway handles:
+  - `<send-file ... />` for file delivery
+  - `<telegram-api method=\"...\" payload='{\"...\":...}' />` for Telegram Bot API calls (admin-only, max 5 per response)
+- Follow-up response actions (`Again`, `Shorter`, `Deeper`) are decided separately via strict structured-output calls.
+
+## Response Action Decision Contract
+
+Primary file: `src/action-advisor.ts`
+
+The gateway runs a second model pass after each successful AI response to decide
+which follow-up action buttons to show for that specific response.
+
+Decision guarantees:
+
+- Uses the same active model and provider as the response turn.
+- Requires strict JSON schema output with only:
+  - `actions: ("regen" | "short" | "deep")[]`
+- Decision is fail-closed: timeout/process/schema failure returns `[]`.
+- No heuristic fallback is allowed for action visibility.
+- `Context` remains visible regardless of decision result.
+
+Provider-specific decision execution:
+
+- Claude CLI:
+  - `-p`
+  - `--output-format json`
+  - `--json-schema <schema-json>`
+  - `--model <activeModel>`
+  - `--no-session-persistence`
+  - `--tools ""`
+- Codex CLI:
+  - `exec`
+  - `--model <activeModel>`
+  - `--output-schema <temp-schema-file>`
+  - `--output-last-message <temp-output-file>`
+  - `--ephemeral`
+  - `--skip-git-repo-check`
+
+Operational notes:
+
+- Prompt/response inputs to the decision pass are truncated using
+  `responseActions.maxPromptChars` and `responseActions.maxResponseChars`.
+- Decision timeout uses `responseActions.decisionTimeoutMs`.
+- Unknown providers return `[]`.
 
 `AIStats` token fields:
 

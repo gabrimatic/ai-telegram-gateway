@@ -24,6 +24,8 @@ This project runs as a long-polling daemon on a trusted host machine. It gives y
 - In-chat schedule manager UI for listing and removing schedules
 - Visual command center (`/menu`) with inline buttons for command groups
 - Predefined random daily check-ins preset (`/schedule checkins`)
+- Admin topic/group controls and generic Telegram API bridge (`/topic`, `/group`, `/tg`)
+- AI-triggered Telegram API calls via `<telegram-api ... />` tags (admin-only, max 5 per response)
 - 80+ slash commands for productivity, system ops, and monitoring
 - Allowlist and pairing-code access control
 - Circuit breaker, watchdog, analytics, and automatic recovery paths
@@ -152,11 +154,18 @@ Notable fields:
   - `conversation.idleTtlMinutes`
   - `conversation.replyContextMaxChars`
   - `conversation.enableReplyContextInjection`
+- Follow-up action buttons:
+  - `responseActions.enabled`
+  - `responseActions.decisionTimeoutMs`
+  - `responseActions.maxPromptChars`
+  - `responseActions.maxResponseChars`
 - Voice:
   - `enableTTS`, `ttsVoice`, `ttsSpeed`, `ttsInstructions`
 - Security:
   - `security.commandWarningsEnabled`
   - `security.argValidationMode` (`moderate` or `strict`)
+
+Follow-up action buttons (`Again`, `Shorter`, `Deeper`) are model-decided per response using strict JSON schema output from the active provider CLI. If decision fails, the bot fails closed (no prompt-action buttons). `Context` remains available on every response. Typed cues (`again`, `shorter`, `deeper`) remain globally available.
 
 ## Command groups
 
@@ -166,6 +175,7 @@ The slash suggestion menu includes the full top-level command surface:
 
 - Core/session: `/start`, `/help`, `/menu`, `/stats`, `/clear`, `/new`, `/id`, `/ping`, `/version`, `/uptime`, `/model`, `/tts`, `/session`
 - Productivity/info: `/todo`, `/remind`, `/timer`, `/schedule`, `/weather`, `/define`, `/translate`
+- Telegram admin controls: `/topic`, `/group`, `/tg`
 - Files/network/system: `/cd`, `/ls`, `/pwd`, `/cat`, `/find`, `/size`, `/curl`, `/net`, `/ps`, `/kill`, `/top`, `/temp`, `/disk`, `/memory`, `/cpu`, `/battery`
 - Operations/monitoring: `/pm2`, `/git`, `/sh`, `/reboot`, `/sentinel`, `/health`, `/analytics`, `/errors`
 - Access: `/pair`

@@ -120,6 +120,56 @@ Returns concise definition with part of speech and example.
 - No args: language buttons.
 - With args: translates and returns only translation.
 
+## Telegram Admin API Controls
+
+All commands in this section are admin-only.
+
+### `/topic`
+
+Forum topic helpers for group/supergroup chats:
+
+- `/topic create <name>`
+- `/topic edit <thread_id> <new_name>`
+- `/topic close [thread_id]`
+- `/topic reopen [thread_id]`
+- `/topic delete [thread_id]`
+- `/topic unpinall [thread_id]`
+- `/topic icons`
+- `/topic general rename <name>`
+- `/topic general hide`
+- `/topic general unhide`
+- `/topic general close`
+- `/topic general reopen`
+
+If `thread_id` is omitted for close/reopen/delete/unpinall, the bot uses the current `message_thread_id`.
+If no current thread exists and no explicit ID is provided, command returns a usage error.
+
+### `/group`
+
+Minimal group helpers:
+
+- `/group status` (chat summary + bot member status + key admin rights)
+- `/group title <text>`
+- `/group description <text>`
+- `/group lock` (restrict chat send permissions)
+- `/group unlock`
+
+### `/tg <method> <json_payload>`
+
+Generic Telegram Bot API bridge for full method coverage.
+
+Examples:
+
+- `/tg createForumTopic {"chat_id":-100123,"name":"Ops"}`
+- `/tg setChatPermissions {"chat_id":-100123,"permissions":{"can_send_messages":false}}`
+
+Behavior:
+
+- Parses payload as strict JSON object.
+- Dispatches to dynamic `ctx.api.raw[method](payload)`.
+- Returns clear parse errors, unknown-method errors, and Telegram API errors.
+- Admin-only; no per-method allowlist for admin users.
+
 ## System Information
 
 ### `/disk`
@@ -321,7 +371,7 @@ The bot also handles inline button callback actions:
 - translate language shortcuts
 - model selection buttons
 - session quick actions
-- AI response actions (`ai_regen_*`, `ai_short_*`, `ai_deep_*`) and context (`ai_ctx_*`)
+- AI response actions (`ai_regen_*`, `ai_short_*`, `ai_deep_*`) are model-decided per response, and context (`ai_ctx_*`) is always available
 - reboot confirm or cancel
 
 Callback handlers are wired in:

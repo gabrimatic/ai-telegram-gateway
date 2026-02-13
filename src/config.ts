@@ -45,6 +45,13 @@ export interface ConversationConfig {
   enableReplyContextInjection: boolean;
 }
 
+export interface ResponseActionsConfig {
+  enabled: boolean;
+  decisionTimeoutMs: number;
+  maxPromptChars: number;
+  maxResponseChars: number;
+}
+
 export interface GatewayConfig {
   debug: boolean;
   aiProvider: string;
@@ -80,6 +87,8 @@ export interface GatewayConfig {
   sentinel: SentinelConfig;
   // Conversation context isolation settings
   conversation: ConversationConfig;
+  // Model-decided follow-up actions settings
+  responseActions: ResponseActionsConfig;
 }
 
 const CONFIG_PATH = env.TG_GATEWAY_CONFIG;
@@ -149,6 +158,12 @@ const DEFAULT_CONFIG: GatewayConfig = {
     idleTtlMinutes: 30,
     replyContextMaxChars: 500,
     enableReplyContextInjection: true,
+  },
+  responseActions: {
+    enabled: true,
+    decisionTimeoutMs: 5000,
+    maxPromptChars: 2000,
+    maxResponseChars: 4000,
   },
 };
 
@@ -253,6 +268,15 @@ export function loadConfig(): GatewayConfig {
           parsed.conversation?.enableReplyContextInjection
           ?? DEFAULT_CONFIG.conversation.enableReplyContextInjection,
       },
+      responseActions: {
+        enabled: parsed.responseActions?.enabled ?? DEFAULT_CONFIG.responseActions.enabled,
+        decisionTimeoutMs:
+          parsed.responseActions?.decisionTimeoutMs ?? DEFAULT_CONFIG.responseActions.decisionTimeoutMs,
+        maxPromptChars:
+          parsed.responseActions?.maxPromptChars ?? DEFAULT_CONFIG.responseActions.maxPromptChars,
+        maxResponseChars:
+          parsed.responseActions?.maxResponseChars ?? DEFAULT_CONFIG.responseActions.maxResponseChars,
+      },
     };
 
     // Validate critical numeric values
@@ -277,6 +301,15 @@ export function loadConfig(): GatewayConfig {
     }
     if (currentConfig.conversation.replyContextMaxChars < 80) {
       currentConfig.conversation.replyContextMaxChars = DEFAULT_CONFIG.conversation.replyContextMaxChars;
+    }
+    if (currentConfig.responseActions.decisionTimeoutMs < 1000) {
+      currentConfig.responseActions.decisionTimeoutMs = DEFAULT_CONFIG.responseActions.decisionTimeoutMs;
+    }
+    if (currentConfig.responseActions.maxPromptChars < 200) {
+      currentConfig.responseActions.maxPromptChars = DEFAULT_CONFIG.responseActions.maxPromptChars;
+    }
+    if (currentConfig.responseActions.maxResponseChars < 200) {
+      currentConfig.responseActions.maxResponseChars = DEFAULT_CONFIG.responseActions.maxResponseChars;
     }
 
     return currentConfig;

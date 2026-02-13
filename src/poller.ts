@@ -5,7 +5,16 @@
 
 import * as fs from "fs";
 import { Bot, Context } from "grammy";
-import { runAI, getStats, isSessionStuck, isSessionRestarting, restartSession, getSessionId } from "./ai";
+import {
+  runAI,
+  getStats,
+  getCurrentModel,
+  getAIProviderName,
+  isSessionStuck,
+  isSessionRestarting,
+  restartSession,
+  getSessionId,
+} from "./ai";
 import { isAuthFailureText } from "./ai/auth-failure";
 import { isDegradedMode } from "./ai/auth-check";
 import { getConfig } from "./config";
@@ -24,7 +33,9 @@ import {
   buildActionKeyboard,
   buildActionPrompt,
   getLatestActionContextForUser,
+  setActionContextAvailableActions,
 } from "./interactive-actions";
+import { decideResponseActions } from "./action-advisor";
 import { buildResponseContextLabel } from "./response-context";
 import { buildReplyContextEnvelope, getConversationKeyFromContext } from "./conversation-context";
 import {
@@ -160,26 +171,40 @@ async function attachActionKeyboard(
   ctx: Context,
   messageId: number,
   token: string,
-  includePromptActions: boolean
+  actions: ("regen" | "short" | "deep")[]
 ): Promise<void> {
   if (!ctx.chat) return;
   try {
     await ctx.api.editMessageReplyMarkup(ctx.chat.id, messageId, {
-      reply_markup: buildActionKeyboard(token, { includePromptActions }),
+      reply_markup: buildActionKeyboard(token, { actions, includeContext: true }),
     });
   } catch {
     // Ignore markup attachment failures (message may be deleted/edited elsewhere)
   }
 }
 
-function shouldAttachActionKeyboard(prompt: string, response: string): boolean {
-  const cueLikePrompt = /^(again|regenerate|shorter|concise|deeper|detail)$/i.test(prompt.trim());
-  if (cueLikePrompt) return true;
-  const text = response.trim();
-  if (text.length >= 90) return true;
+function truncateForDecision(text: string, maxChars: number): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  const clipped = trimmed.slice(0, Math.max(0, maxChars - 13));
+  return `${clipped}[truncated]`;
+}
 
-  const looksStructured = /\n|•|- /.test(text) || (text.match(/[.!?]/g)?.length ?? 0) >= 2;
-  return text.length >= 50 && looksStructured;
+async function getModelDecidedActions(prompt: string, response: string): Promise<("regen" | "short" | "deep")[]> {
+  const config = getConfig();
+  if (!config.responseActions.enabled) {
+    return [];
+  }
+
+  const decisionPrompt = truncateForDecision(prompt, config.responseActions.maxPromptChars);
+  const decisionResponse = truncateForDecision(response, config.responseActions.maxResponseChars);
+  return decideResponseActions({
+    prompt: decisionPrompt,
+    response: decisionResponse,
+    model: getCurrentModel(),
+    provider: getAIProviderName(),
+    timeoutMs: config.responseActions.decisionTimeoutMs,
+  });
 }
 
 function buildPromptWithReplyContext(
@@ -623,10 +648,11 @@ async function handleMessage(ctx: Context): Promise<void> {
       trackOutboundMessage(responseTimeMs, result.response.length);
       await streamHandler.finalize();
       const token = createActionContext(userId, messageText, buildResponseContextLabel());
+      const availableActions = await getModelDecidedActions(messageText, result.response);
+      setActionContextAvailableActions(token, availableActions);
       const messageId = streamHandler.getCurrentMessageId();
       if (messageId) {
-        const includePromptActions = shouldAttachActionKeyboard(messageText, result.response);
-        await attachActionKeyboard(ctx, messageId, token, includePromptActions);
+        await attachActionKeyboard(ctx, messageId, token, availableActions);
       }
       debug("poller", "message_processed", {
         userId,
@@ -797,10 +823,11 @@ async function processTextWithClaude(
           actionContextPrompt,
           buildResponseContextLabel()
         );
+        const availableActions = await getModelDecidedActions(actionContextPrompt, result.response);
+        setActionContextAvailableActions(token, availableActions);
         const messageId = streamHandler.getCurrentMessageId();
         if (messageId) {
-          const includePromptActions = shouldAttachActionKeyboard(text, result.response);
-          await attachActionKeyboard(ctx, messageId, token, includePromptActions);
+          await attachActionKeyboard(ctx, messageId, token, availableActions);
         }
       }
       debug("poller", "message_processed", {
@@ -972,6 +999,9 @@ export async function createBot(
       { command: "weather", description: "Weather info" },
       { command: "define", description: "Define a word" },
       { command: "translate", description: "Translate text" },
+      { command: "topic", description: "Manage forum topics (admin)" },
+      { command: "group", description: "Group controls and status (admin)" },
+      { command: "tg", description: "Call any Telegram Bot API method (admin)" },
       { command: "disk", description: "Disk usage" },
       { command: "memory", description: "Memory usage" },
       { command: "cpu", description: "CPU info" },

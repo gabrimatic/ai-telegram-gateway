@@ -17,7 +17,7 @@ import {
 } from "./service-manager";
 import { setBotInstance } from "./alerting";
 import { getConfiguredProviderName, getProviderProcessConfig } from "./provider";
-import { initTaskScheduler, stopTaskScheduler, setTaskNotifier, reloadSchedules } from "./task-scheduler";
+import { initTaskScheduler, stopTaskScheduler, setTaskNotifier, reloadSchedules, setTaskTelegramApiContextProvider } from "./task-scheduler";
 import { initAnalytics, stopAnalytics } from "./analytics";
 import { startWatchdog, stopWatchdog } from "./watchdog";
 import { initSentinel, stopSentinel } from "./sentinel";
@@ -207,6 +207,7 @@ async function main(): Promise<void> {
   startWatchdog();
 
   // Initialize task scheduler and wire up notifications via bot
+  const botMe = bot.botInfo ?? await bot.api.getMe();
   setTaskNotifier(async (userId: string, message: string) => {
     try {
       await bot.api.sendMessage(userId, message);
@@ -217,6 +218,13 @@ async function main(): Promise<void> {
       });
     }
   });
+  setTaskTelegramApiContextProvider(() => ({
+    raw: bot.api.raw,
+    getMe: () => bot.api.getMe(),
+    getChat: (chatId: number | string) => bot.api.getChat(chatId),
+    getChatMember: (chatId: number | string, userId: number) => bot.api.getChatMember(chatId, userId),
+    botId: botMe.id,
+  }));
   initTaskScheduler();
 
   // Initialize sentinel (proactive monitoring)

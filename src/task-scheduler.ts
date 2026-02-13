@@ -24,6 +24,8 @@ import * as cron from "node-cron";
 import { env } from "./env";
 import { getConfig } from "./config";
 import { info, warn, error as logError, debug } from "./logger";
+import { isAdminUser, loadAllowlist } from "./storage";
+import { executeTelegramApiCall, parseTelegramApiPayload, parseTelegramApiTags, removeTelegramApiTags, TelegramApiContextLike } from "./telegram-api-executor";
 
 // --- Types ---
 
@@ -88,6 +90,7 @@ const activeTimers: Map<number, NodeJS.Timeout> = new Map();
 const runningSchedules: Set<number> = new Set();
 // Notification callback - set by the bot integration
 let notifyUser: ((userId: string, message: string) => Promise<void>) | null = null;
+let telegramApiContextProvider: (() => TelegramApiContextLike & { botId?: number }) | null = null;
 
 // --- Storage ---
 
@@ -998,6 +1001,75 @@ async function executeRandomCheckinPlannerTask(userId: string): Promise<{ output
 
 // --- Output routing ---
 
+async function executePromptTelegramApiTags(schedule: Schedule, output: string): Promise<string> {
+  const tags = parseTelegramApiTags(output);
+  if (tags.length === 0) {
+    return output;
+  }
+
+  const cleanedText = removeTelegramApiTags(output);
+  const allowlist = await loadAllowlist();
+  const isAdmin = isAdminUser(schedule.userId, allowlist);
+  if (!isAdmin) {
+    warn("task-scheduler", "telegram_api_tags_blocked_non_admin", {
+      id: schedule.id,
+      userId: schedule.userId,
+      tagCount: tags.length,
+    });
+    return cleanedText.trim() || "Ignored Telegram API action tags (admin only).";
+  }
+
+  const context = telegramApiContextProvider?.();
+  if (!context) {
+    warn("task-scheduler", "telegram_api_context_unavailable", {
+      id: schedule.id,
+      tagCount: tags.length,
+    });
+    return cleanedText.trim() || "Telegram API actions skipped: bot API context unavailable.";
+  }
+
+  const summaryLines: string[] = [];
+  const executable = tags.slice(0, 5);
+  for (let i = 0; i < executable.length; i++) {
+    const tag = executable[i];
+    const parsedPayload = parseTelegramApiPayload(tag.payload);
+    if (!parsedPayload.ok || !parsedPayload.payload) {
+      summaryLines.push(`#${i + 1} ${tag.method}: ERROR ${parsedPayload.error}`);
+      continue;
+    }
+
+    const result = await executeTelegramApiCall(context, {
+      method: tag.method,
+      payload: parsedPayload.payload,
+    }, {
+      callerType: "scheduler",
+      userId: schedule.userId,
+      isAdmin: true,
+      botId: context.botId,
+    });
+
+    if (result.success) {
+      summaryLines.push(`#${i + 1} ${tag.method}: OK`);
+    } else {
+      const details = result.errorCode
+        ? `${result.errorCode} ${result.description ?? ""}`.trim()
+        : result.description ?? "failed";
+      summaryLines.push(`#${i + 1} ${tag.method}: ERROR ${details}`);
+    }
+  }
+
+  if (tags.length > 5) {
+    summaryLines.push(`Ignored ${tags.length - 5} extra tag(s); max 5 per response.`);
+  }
+
+  const summaryText = `Telegram API actions:\n${summaryLines.join("\n")}`;
+  if (!cleanedText.trim()) {
+    return summaryText;
+  }
+
+  return `${cleanedText.trim()}\n\n${summaryText}`;
+}
+
 /**
  * Route task output based on schedule.output setting.
  */
@@ -1007,18 +1079,23 @@ async function routeOutput(
   success: boolean,
   durationMs: number
 ): Promise<void> {
+  let effectiveTaskOutput = taskOutput;
+  if ((schedule.jobType ?? "prompt") === "prompt") {
+    effectiveTaskOutput = await executePromptTelegramApiTags(schedule, taskOutput);
+  }
+
   const outputTarget = schedule.output ?? "telegram";
   const statusIcon = success ? "\u2705" : "\u274C";
-  const truncatedOutput = taskOutput.length > 1500
-    ? taskOutput.substring(0, 1500) + "... (truncated)"
-    : taskOutput;
+  const truncatedOutput = effectiveTaskOutput.length > 1500
+    ? effectiveTaskOutput.substring(0, 1500) + "... (truncated)"
+    : effectiveTaskOutput;
   const displayName = schedule.name ? ` (${schedule.name})` : "";
   const message = `${statusIcon} Task #${schedule.id}${displayName} ${success ? "completed" : "failed"} (${(durationMs / 1000).toFixed(1)}s):\n\n${truncatedOutput}`;
 
   if (outputTarget === "telegram") {
     if (notifyUser) {
       if (isRandomCheckinMessageTask(schedule.task) && success) {
-        const compactMessage = taskOutput
+        const compactMessage = effectiveTaskOutput
           .replace(/\s+/g, " ")
           .trim()
           .slice(0, RANDOM_CHECKIN_MAX_TELEGRAM_CHARS)
@@ -1034,7 +1111,7 @@ async function routeOutput(
   } else if (outputTarget.startsWith("file:")) {
     const filePath = outputTarget.slice(5);
     try {
-      appendFileSync(filePath, `[${new Date().toISOString()}] Task #${schedule.id}${displayName} (${success ? "ok" : "fail"}):\n${taskOutput}\n\n`);
+      appendFileSync(filePath, `[${new Date().toISOString()}] Task #${schedule.id}${displayName} (${success ? "ok" : "fail"}):\n${effectiveTaskOutput}\n\n`);
     } catch (err) {
       logError("task-scheduler", "file_output_error", {
         id: schedule.id,
@@ -1045,7 +1122,7 @@ async function routeOutput(
   } else if (outputTarget.startsWith("email:")) {
     const address = outputTarget.slice(6);
     const subject = `Schedule #${schedule.id}: ${schedule.name || schedule.task.substring(0, 50)}`;
-    const body = `${success ? "Success" : "Failed"} (${(durationMs / 1000).toFixed(1)}s)\n\n${taskOutput}`;
+    const body = `${success ? "Success" : "Failed"} (${(durationMs / 1000).toFixed(1)}s)\n\n${effectiveTaskOutput}`;
     execFile(
       "/opt/homebrew/bin/gog",
       ["gmail", "send", "--to", address, "--subject", subject, "--body", body, "--account", process.env.GOG_ACCOUNT || address],
@@ -1408,6 +1485,12 @@ export function setTaskNotifier(
   callback: (userId: string, message: string) => Promise<void>
 ): void {
   notifyUser = callback;
+}
+
+export function setTaskTelegramApiContextProvider(
+  provider: () => TelegramApiContextLike & { botId?: number }
+): void {
+  telegramApiContextProvider = provider;
 }
 
 /**

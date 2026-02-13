@@ -3,7 +3,7 @@
  */
 
 import { Context, InlineKeyboard, CallbackQueryContext } from "grammy";
-import { runAI, getStats as getAIStats, getCurrentModel, restartSession, stopSession, getSessionId, isSessionAlive, getCircuitBreakerState, switchModel, getAvailableModels } from "./ai";
+import { runAI, getStats as getAIStats, getCurrentModel, getAIProviderName, restartSession, stopSession, getSessionId, isSessionAlive, getCircuitBreakerState, switchModel, getAvailableModels } from "./ai";
 import { getConfig, ModelName } from "./config";
 import { error } from "./logger";
 import { incrementMessages, incrementErrors } from "./health";
@@ -36,8 +36,10 @@ import {
   createActionContext,
   buildActionPrompt,
   buildActionKeyboard,
+  setActionContextAvailableActions,
 } from "./interactive-actions";
 import { buildResponseContextLabel } from "./response-context";
+import { decideResponseActions } from "./action-advisor";
 import {
   buildScheduleHomeView,
   buildScheduleListView,
@@ -74,6 +76,30 @@ function withSystemPrompt(prompt: string, contextKey?: string): string {
     providerDisplayName: config.providerDisplayName,
   });
   return wrapWithSystemPrompt(systemPrompt, prompt);
+}
+
+function truncateForDecision(text: string, maxChars: number): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  const clipped = trimmed.slice(0, Math.max(0, maxChars - 13));
+  return `${clipped}[truncated]`;
+}
+
+async function getModelDecidedActions(prompt: string, response: string): Promise<("regen" | "short" | "deep")[]> {
+  const config = getConfig();
+  if (!config.responseActions.enabled) {
+    return [];
+  }
+
+  const decisionPrompt = truncateForDecision(prompt, config.responseActions.maxPromptChars);
+  const decisionResponse = truncateForDecision(response, config.responseActions.maxResponseChars);
+  return decideResponseActions({
+    prompt: decisionPrompt,
+    response: decisionResponse,
+    model: getCurrentModel(),
+    provider: getAIProviderName(),
+    timeoutMs: config.responseActions.decisionTimeoutMs,
+  });
 }
 
 async function editCallbackMessage(
@@ -645,6 +671,13 @@ export async function handleAIActionCallback(ctx: CallbackQueryContext<Context>)
       await ctx.answerCallbackQuery("This action belongs to another user.");
       return;
     }
+    if (
+      actionContext.availableActions
+      && !actionContext.availableActions.includes(action)
+    ) {
+      await ctx.answerCallbackQuery("This action is unavailable for this response.");
+      return;
+    }
 
     await ctx.answerCallbackQuery("Working...");
 
@@ -671,14 +704,23 @@ export async function handleAIActionCallback(ctx: CallbackQueryContext<Context>)
     await activeStreamHandler.finalize();
     const messageId = activeStreamHandler.getCurrentMessageId();
     if (messageId && ctx.chat) {
+      const nextActions = await getModelDecidedActions(actionContext.prompt, result.response);
       const nextToken = createActionContext(
         userId,
         actionContext.prompt,
         buildResponseContextLabel()
       );
-      await ctx.api.editMessageReplyMarkup(ctx.chat.id, messageId, {
-        reply_markup: buildActionKeyboard(nextToken, { includePromptActions: true }),
-      });
+      setActionContextAvailableActions(nextToken, nextActions);
+      try {
+        await ctx.api.editMessageReplyMarkup(ctx.chat.id, messageId, {
+          reply_markup: buildActionKeyboard(nextToken, {
+            actions: nextActions,
+            includeContext: true,
+          }),
+        });
+      } catch {
+        // Ignore markup attachment failures (message may be deleted/edited elsewhere)
+      }
     }
   } catch (err) {
     streamHandler?.cleanup();

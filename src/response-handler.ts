@@ -21,6 +21,10 @@ import {
   validateFileSendPath,
 } from "./files";
 import { loadAllowlist, isAdminUser } from "./storage";
+import {
+  executeTelegramApiTags,
+  removeTelegramApiTags,
+} from "./telegram-api-executor";
 
 type MessageWithTopicContext = Context["msg"] & {
   message_thread_id?: number;
@@ -370,11 +374,72 @@ export class StreamingResponseHandler {
     await this.performDraft(true);
     await this.performEdit();
 
+    // Process any <telegram-api> tags first so text clean-up applies before file dispatch.
+    await this.processTelegramApiTags();
+
     // Process any <send-file> tags in the accumulated text
     await this.processFileTags();
 
     // Cleanup
     this.cleanup();
+  }
+
+  private async processTelegramApiTags(): Promise<void> {
+    if (!this.accumulatedText) return;
+
+    const userId = this.ctx.from?.id?.toString();
+    const allowlist = await loadAllowlist();
+    const isAdmin = userId ? isAdminUser(userId, allowlist) : false;
+    const execution = await executeTelegramApiTags(this.ctx.api, this.accumulatedText, {
+      callerType: "model_tag",
+      userId,
+      isAdmin,
+      chatId: this.ctx.chat?.id,
+    });
+
+    if (!execution.hadTags) {
+      return;
+    }
+
+    this.accumulatedText = execution.cleanedText;
+    const summaryText = execution.summaryLines.length > 0
+      ? `Telegram API actions:\n${execution.summaryLines.join("\n")}`
+      : "";
+    const visibleText = removeFileTags(this.accumulatedText).trim();
+
+    if (visibleText) {
+      if (this.currentMessageId !== null && this.ctx.chat) {
+        await this.editWithMarkdown(this.ctx.chat.id, this.currentMessageId, visibleText);
+      } else {
+        const msg = await this.sendWithMarkdown(visibleText);
+        this.currentMessageId = msg.message_id;
+      }
+      this.lastSentText = visibleText;
+      return;
+    }
+
+    if (summaryText) {
+      // Preserve file tags in accumulated text so processFileTags() still dispatches uploads.
+      this.accumulatedText = this.accumulatedText.trim()
+        ? `${summaryText}\n${this.accumulatedText}`
+        : summaryText;
+      if (this.currentMessageId !== null && this.ctx.chat) {
+        await this.editWithMarkdown(this.ctx.chat.id, this.currentMessageId, summaryText);
+      } else {
+        const msg = await this.sendWithMarkdown(summaryText);
+        this.currentMessageId = msg.message_id;
+      }
+      this.lastSentText = summaryText;
+      return;
+    }
+
+    if (this.currentMessageId !== null && this.ctx.chat) {
+      try {
+        await this.ctx.api.deleteMessage(this.ctx.chat.id, this.currentMessageId);
+      } catch {
+        // Ignore cleanup failure.
+      }
+    }
   }
 
   private async performDraft(force: boolean = false): Promise<void> {
@@ -679,8 +744,26 @@ export async function sendResponse(
 ): Promise<void> {
   const config = getConfig();
   const { text, includeAudio = false, userId } = options;
+  const allowlist = await loadAllowlist();
+  const isAdmin = userId ? isAdminUser(userId, allowlist) : false;
+  const apiTagExecution = await executeTelegramApiTags(ctx.api, text, {
+    callerType: "model_tag",
+    userId,
+    isAdmin,
+    chatId: ctx.chat?.id,
+  });
+  const cleanedText = removeTelegramApiTags(apiTagExecution.cleanedText);
+  const summaryText = apiTagExecution.summaryLines.length > 0
+    ? `Telegram API actions:\n${apiTagExecution.summaryLines.join("\n")}`
+    : "";
+  const visibleTextAfterFileTags = removeFileTags(cleanedText).trim();
+  const finalText = visibleTextAfterFileTags
+    ? cleanedText
+    : summaryText
+      ? `${summaryText}\n${cleanedText}`.trim()
+      : cleanedText;
 
-  if (!text || text.trim().length === 0) {
+  if (!finalText || finalText.trim().length === 0) {
     await ctx.reply("(empty response)", buildReplyOptions(ctx) as any);
     return;
   }
@@ -691,7 +774,7 @@ export async function sendResponse(
     try {
       debug("response", "generating_audio", { userId, textLength: text.length });
 
-      const audioResult = await generateAudio(text);
+      const audioResult = await generateAudio(finalText);
 
       if (!audioResult.success || !audioResult.audioPath) {
         debug("response", "audio_generation_failed", {
@@ -699,7 +782,7 @@ export async function sendResponse(
           error: audioResult.error,
         });
         // Fall back to text if audio generation fails
-        await ctx.reply(`[Voice unavailable] ${text}`, buildReplyOptions(ctx) as any);
+        await ctx.reply(`[Voice unavailable] ${finalText}`, buildReplyOptions(ctx) as any);
         return;
       }
 
@@ -709,7 +792,7 @@ export async function sendResponse(
           userId,
           path: audioResult.audioPath,
         });
-        await ctx.reply(`[Voice unavailable] ${text}`, buildReplyOptions(ctx) as any);
+        await ctx.reply(`[Voice unavailable] ${finalText}`, buildReplyOptions(ctx) as any);
         return;
       }
 
@@ -751,14 +834,14 @@ export async function sendResponse(
       const errorMsg = err instanceof Error ? err.message : String(err);
       logError("response", "audio_send_failed", { userId, error: errorMsg });
       // Fall back to text
-      await ctx.reply(`[Voice unavailable] ${text}`, buildReplyOptions(ctx) as any);
+      await ctx.reply(`[Voice unavailable] ${finalText}`, buildReplyOptions(ctx) as any);
       return;
     }
   }
 
   // Check for file send requests in the response
-  const fileSendRequests = parseFileSendRequest(text);
-  let remainingText = fileSendRequests.length > 0 ? removeFileTags(text) : text;
+  const fileSendRequests = parseFileSendRequest(finalText);
+  let remainingText = fileSendRequests.length > 0 ? removeFileTags(finalText) : finalText;
 
   // Send any requested files first
   for (const fileRequest of fileSendRequests) {
