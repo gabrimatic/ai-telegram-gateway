@@ -23,6 +23,7 @@ import {
   buildActionPrompt,
   getLatestActionContextForUser,
 } from "./interactive-actions";
+import { buildResponseContextLabel } from "./response-context";
 import {
   downloadTelegramFile,
   formatFileMetadata,
@@ -112,15 +113,21 @@ import {
   handleRebootConfirmCallback,
   handleRebootCancelCallback,
   handleAIActionCallback,
+  handleAIContextCallback,
   handleScheduleCallback,
   handleCommandCenterCallback,
 } from "./callbacks";
 
-async function attachActionKeyboard(ctx: Context, messageId: number, token: string): Promise<void> {
+async function attachActionKeyboard(
+  ctx: Context,
+  messageId: number,
+  token: string,
+  includePromptActions: boolean
+): Promise<void> {
   if (!ctx.chat) return;
   try {
     await ctx.api.editMessageReplyMarkup(ctx.chat.id, messageId, {
-      reply_markup: buildActionKeyboard(token),
+      reply_markup: buildActionKeyboard(token, { includePromptActions }),
     });
   } catch {
     // Ignore markup attachment failures (message may be deleted/edited elsewhere)
@@ -554,10 +561,11 @@ async function handleMessage(ctx: Context): Promise<void> {
       recordSuccess();
       trackOutboundMessage(responseTimeMs, result.response.length);
       await streamHandler.finalize();
-      const token = createActionContext(userId, messageText);
+      const token = createActionContext(userId, messageText, buildResponseContextLabel());
       const messageId = streamHandler.getCurrentMessageId();
-      if (messageId && shouldAttachActionKeyboard(messageText, result.response)) {
-        await attachActionKeyboard(ctx, messageId, token);
+      if (messageId) {
+        const includePromptActions = shouldAttachActionKeyboard(messageText, result.response);
+        await attachActionKeyboard(ctx, messageId, token, includePromptActions);
       }
       debug("poller", "message_processed", {
         userId,
@@ -698,10 +706,15 @@ async function processTextWithClaude(
         }
       } else {
         await streamHandler.finalize();
-        const token = createActionContext(userId, actionContextPrompt);
+        const token = createActionContext(
+          userId,
+          actionContextPrompt,
+          buildResponseContextLabel()
+        );
         const messageId = streamHandler.getCurrentMessageId();
-        if (messageId && shouldAttachActionKeyboard(text, result.response)) {
-          await attachActionKeyboard(ctx, messageId, token);
+        if (messageId) {
+          const includePromptActions = shouldAttachActionKeyboard(text, result.response);
+          await attachActionKeyboard(ctx, messageId, token, includePromptActions);
         }
       }
       debug("poller", "message_processed", {
@@ -847,7 +860,7 @@ export async function createBot(
       { command: "help", description: "Show all commands" },
       { command: "menu", description: "Open visual command center" },
       { command: "stats", description: "Gateway runtime stats" },
-      { command: "clear", description: "Fresh session start" },
+      { command: "clear", description: "New or fresh session start" },
       { command: "id", description: "Show your Telegram ID" },
       { command: "ping", description: "Latency check" },
       { command: "version", description: "Gateway version info" },
@@ -923,6 +936,7 @@ export async function createBot(
   bot.callbackQuery("reboot_confirm", handleRebootConfirmCallback);
   bot.callbackQuery("reboot_cancel", handleRebootCancelCallback);
   bot.callbackQuery(/^sched_.+$/, handleScheduleCallback);
+  bot.callbackQuery(/^ai_ctx_[a-z0-9]+$/, handleAIContextCallback);
   bot.callbackQuery(/^ai_(regen|short|deep)_[a-z0-9]+$/, handleAIActionCallback);
 
   // Catch-all handler to prevent loading spinners on unknown callbacks

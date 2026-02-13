@@ -6,6 +6,7 @@ Sentinel is an internal, timer-driven review cycle.
 It runs operational checks without waiting for inbound chat traffic.
 When the cycle finds no issue, it stays silent.
 When the cycle finds a problem, it sends an admin alert.
+When the finding looks like a runtime or gateway issue, sentinel also triggers self-heal checks automatically.
 
 ## Implementation Map
 
@@ -70,10 +71,12 @@ Shutdown behavior:
 - `error`: failed execution or timeout
 - `ack`: healthy token response, no outbound alert
 - `alert`: non-ack response, sends Telegram admin alert
+- `runtime/gateway alert`: non-ack alert with runtime keywords triggers self-heal checks
 
 8. Finalization
 - Always releases AI slot.
 - Always clears re-entry lock.
+- Runs self-heal checks when beat execution fails or runtime/gateway issues are detected.
 
 ## Healthy Token Rules
 
@@ -98,6 +101,7 @@ When classification is `alert`:
 - Output format: HTML
 - Header: `💓 <b>Sentinel Alert</b>`
 - Body: escaped model response
+- Runtime/gateway alerts include an "Auto-recovery" line in the alert text.
 
 Failure handling:
 - Missing `TG_ADMIN_ID`: warning log only
@@ -149,6 +153,7 @@ Repository config currently enables sentinel with the same timing defaults.
 - Very short intervals increase model usage and alert volume.
 - If admin id is not configured, alerts are generated but not delivered.
 - Timeout or model failure produces `error` history entries.
+- Runtime/gateway alerts can trigger recovery actions that restart sessions or clean resources.
 
 ## References
 

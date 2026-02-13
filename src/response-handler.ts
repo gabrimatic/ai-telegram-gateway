@@ -21,38 +21,6 @@ import {
   validateFileSendPath,
 } from "./files";
 import { loadAllowlist, isAdminUser } from "./storage";
-import { getCurrentModel, getStats as getAIStats } from "./ai";
-import * as os from "os";
-
-/** Format token count as compact string (e.g. 12k, 150k) */
-function formatTokens(n: number): string {
-  if (n >= 1000) return Math.round(n / 1000) + "k";
-  return String(n);
-}
-
-/** Build a small context footer for AI responses */
-function buildContextFooter(): string {
-  const stats = getAIStats();
-  const cwd = process.cwd();
-  const home = os.homedir();
-  let short: string;
-  if (cwd === home) {
-    short = "~";
-  } else {
-    const displayCwd = cwd.startsWith(home) ? "~" + cwd.slice(home.length) : cwd;
-    short = displayCwd.split("/").slice(-2).join("/");
-  }
-
-  let contextPart: string;
-  if (stats?.totalInputTokens && stats.contextWindow) {
-    const used = stats.totalInputTokens + (stats.totalOutputTokens || 0);
-    contextPart = `${formatTokens(used)}/${formatTokens(stats.contextWindow)}`;
-  } else {
-    contextPart = getCurrentModel();
-  }
-
-  return `\n\n\u2014\n${contextPart} \u00b7 ${short}`;
-}
 
 /** Convert standard markdown to Telegram MarkdownV2 format */
 function toTelegramMarkdown(text: string): string {
@@ -331,14 +299,6 @@ export class StreamingResponseHandler {
     // Perform final edit
     await this.performEdit();
 
-    // Append context footer
-    if (this.currentMessageId !== null && !this.accumulateOnly) {
-      const footer = buildContextFooter();
-      this.accumulatedText += footer;
-      this.lastSentText = ""; // Force re-edit
-      await this.performEdit();
-    }
-
     // Process any <send-file> tags in the accumulated text
     await this.processFileTags();
 
@@ -586,7 +546,6 @@ export interface SendResponseOptions {
   text: string;
   includeAudio?: boolean;
   userId?: string;
-  skipFooter?: boolean;
 }
 
 /**
@@ -598,7 +557,7 @@ export async function sendResponse(
   options: SendResponseOptions
 ): Promise<void> {
   const config = getConfig();
-  const { text, includeAudio = false, userId, skipFooter = false } = options;
+  const { text, includeAudio = false, userId } = options;
 
   if (!text || text.trim().length === 0) {
     await ctx.reply("(empty response)", buildReplyOptions(ctx) as any);
@@ -736,14 +695,13 @@ export async function sendResponse(
 
   // Text response: send remaining text only if there's content
   if (remainingText && remainingText.trim().length > 0) {
-    const fullText = skipFooter ? remainingText : remainingText + buildContextFooter();
     try {
-      await ctx.reply(toTelegramMarkdown(fullText), {
+      await ctx.reply(toTelegramMarkdown(remainingText), {
         ...buildReplyOptions(ctx),
         parse_mode: "MarkdownV2",
       } as any);
     } catch {
-      await ctx.reply(fullText, buildReplyOptions(ctx) as any);
+      await ctx.reply(remainingText, buildReplyOptions(ctx) as any);
     }
   }
 }
@@ -753,7 +711,7 @@ export async function sendResponse(
  */
 export async function sendErrorResponse(ctx: Context, error: string, userId?: string): Promise<void> {
   const text = error || "An error occurred processing your request.";
-  await sendResponse(ctx, { text, includeAudio: false, userId, skipFooter: true });
+  await sendResponse(ctx, { text, includeAudio: false, userId });
 }
 
 /**

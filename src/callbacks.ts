@@ -37,6 +37,7 @@ import {
   buildActionPrompt,
   buildActionKeyboard,
 } from "./interactive-actions";
+import { buildResponseContextLabel } from "./response-context";
 import {
   buildScheduleHomeView,
   buildScheduleListView,
@@ -666,9 +667,13 @@ export async function handleAIActionCallback(ctx: CallbackQueryContext<Context>)
     await activeStreamHandler.finalize();
     const messageId = activeStreamHandler.getCurrentMessageId();
     if (messageId && ctx.chat) {
-      const nextToken = createActionContext(userId, actionContext.prompt);
+      const nextToken = createActionContext(
+        userId,
+        actionContext.prompt,
+        buildResponseContextLabel()
+      );
       await ctx.api.editMessageReplyMarkup(ctx.chat.id, messageId, {
-        reply_markup: buildActionKeyboard(nextToken),
+        reply_markup: buildActionKeyboard(nextToken, { includePromptActions: true }),
       });
     }
   } catch (err) {
@@ -680,5 +685,48 @@ export async function handleAIActionCallback(ctx: CallbackQueryContext<Context>)
     await ctx.answerCallbackQuery("Something went wrong");
   } finally {
     streamHandler?.cleanup();
+  }
+}
+
+export async function handleAIContextCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
+  try {
+    if (!(await isAllowedCallbackUser(ctx))) {
+      await ctx.answerCallbackQuery("Not authorized");
+      return;
+    }
+
+    const match = ctx.callbackQuery.data.match(/^ai_ctx_([a-z0-9]+)$/);
+    if (!match) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const token = match[1];
+    const userId = ctx.from?.id?.toString();
+    if (!userId) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const actionContext = getActionContext(token);
+    if (!actionContext) {
+      await ctx.answerCallbackQuery("This context expired. Send a new message.");
+      return;
+    }
+    if (actionContext.userId !== userId) {
+      await ctx.answerCallbackQuery("This context belongs to another user.");
+      return;
+    }
+
+    const contextLabel = actionContext.responseContext ?? "unavailable";
+    await ctx.answerCallbackQuery({
+      text: `Context: ${contextLabel}`,
+      show_alert: false,
+    });
+  } catch (err) {
+    error("callbacks", "ai_context_callback_failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    await ctx.answerCallbackQuery("Something went wrong");
   }
 }

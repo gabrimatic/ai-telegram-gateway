@@ -23,6 +23,7 @@ This project runs as a long-polling daemon on a trusted host machine. It gives y
 - 80+ slash commands for productivity, system ops, and monitoring
 - Allowlist and pairing-code access control
 - Circuit breaker, watchdog, analytics, and automatic recovery paths
+- Sentinel runtime alerts can trigger automatic self-heal checks
 - JSON-file persistence under `~/.claude/` (no database)
 
 ## Platform support

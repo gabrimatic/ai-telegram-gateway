@@ -19,6 +19,7 @@ import { runAI } from "./ai";
 import { getConfig } from "./config";
 import { info, warn, error as logError, debug } from "./logger";
 import { tryAcquireAISlot, releaseAISlot } from "./poller";
+import { runSelfHealingChecks, recordError as recordSelfHealError } from "./self-heal";
 
 // --- Constants ---
 
@@ -28,6 +29,8 @@ const HISTORY_PATH = join(SENTINEL_DIR, "sentinel-history.json");
 const ACK_TOKEN = "SENTINEL_OK";
 const MAX_HISTORY = 20;
 const BEAT_TIMEOUT_MS = 90_000; // 90s max per beat
+const RUNTIME_ALERT_PATTERN =
+  /\b(gateway|runtime|session|process|pm2|memory|disk|cpu|network|telegram|timeout|crash|failed|error|stuck|unresponsive|down)\b/i;
 
 // --- Types ---
 
@@ -125,6 +128,34 @@ function buildSentinelPrompt(checklistContent: string): string {
   ].join("\n");
 }
 
+function classifySentinelError(errorMessage: string): "timeout" | "process_crash" | "unknown" {
+  const msg = errorMessage.toLowerCase();
+  if (msg.includes("timeout") || msg.includes("timed out")) {
+    return "timeout";
+  }
+  if (msg.includes("spawn") || msg.includes("exit") || msg.includes("crash") || msg.includes("econn")) {
+    return "process_crash";
+  }
+  return "unknown";
+}
+
+function shouldAutoRecoverFromAlert(response: string): boolean {
+  return RUNTIME_ALERT_PATTERN.test(response);
+}
+
+async function triggerSentinelAutoRecovery(trigger: string, details: string): Promise<void> {
+  info("sentinel", "auto_recovery_start", { trigger, details: details.substring(0, 300) });
+  try {
+    await runSelfHealingChecks();
+    info("sentinel", "auto_recovery_complete", { trigger });
+  } catch (err) {
+    logError("sentinel", "auto_recovery_failed", {
+      trigger,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 function loadHistory(): SentinelHistoryEntry[] {
   try {
     if (existsSync(HISTORY_PATH)) {
@@ -169,6 +200,9 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 // --- Core beat ---
 
 async function runBeat(): Promise<void> {
+  let autoRecoveryTrigger: string | null = null;
+  let autoRecoveryDetails = "";
+
   if (beatInProgress) {
     debug("sentinel", "skipped_in_progress");
     addHistory({ timestamp: new Date().toISOString(), result: "skipped", message: "beat already in progress" });
@@ -208,10 +242,14 @@ async function runBeat(): Promise<void> {
 
     if (!result.success) {
       logError("sentinel", "beat_failed", { error: result.error });
+      const errText = result.error || "AI returned failure";
+      recordSelfHealError(classifySentinelError(errText), `sentinel beat failed: ${errText}`);
+      autoRecoveryTrigger = "sentinel_beat_failed";
+      autoRecoveryDetails = errText;
       addHistory({
         timestamp: new Date().toISOString(),
         result: "error",
-        message: result.error || "AI returned failure",
+        message: errText,
         durationMs,
       });
       return;
@@ -228,6 +266,12 @@ async function runBeat(): Promise<void> {
       });
     } else {
       info("sentinel", "beat_alert", { durationMs, responseLength: response.length });
+      const runtimeIssueDetected = shouldAutoRecoverFromAlert(response);
+      if (runtimeIssueDetected) {
+        recordSelfHealError("unknown", `sentinel runtime alert: ${response.substring(0, 500)}`);
+        autoRecoveryTrigger = "sentinel_runtime_alert";
+        autoRecoveryDetails = response.substring(0, 500);
+      }
       addHistory({
         timestamp: new Date().toISOString(),
         result: "alert",
@@ -241,7 +285,10 @@ async function runBeat(): Promise<void> {
         if (adminId) {
           const icon = "\u{1F493}";
           const safeResponse = escapeHtml(response);
-          await notifyUser(adminId, `${icon} <b>Sentinel Alert</b>\n\n${safeResponse}`).catch((err) => {
+          const recoveryLine = runtimeIssueDetected
+            ? "\n\n<b>Auto-recovery:</b> Triggered self-heal checks."
+            : "";
+          await notifyUser(adminId, `${icon} <b>Sentinel Alert</b>\n\n${safeResponse}${recoveryLine}`).catch((err) => {
             logError("sentinel", "notify_failed", {
               error: err instanceof Error ? err.message : String(err),
             });
@@ -253,17 +300,24 @@ async function runBeat(): Promise<void> {
     }
   } catch (err) {
     const durationMs = Date.now() - startTime;
+    const errText = err instanceof Error ? err.message : String(err);
     logError("sentinel", "beat_error", {
-      error: err instanceof Error ? err.message : String(err),
+      error: errText,
     });
+    recordSelfHealError(classifySentinelError(errText), `sentinel beat exception: ${errText}`);
+    autoRecoveryTrigger = "sentinel_beat_exception";
+    autoRecoveryDetails = errText;
     addHistory({
       timestamp: new Date().toISOString(),
       result: "error",
-      message: err instanceof Error ? err.message : String(err),
+      message: errText,
       durationMs,
     });
   } finally {
     releaseAISlot();
+    if (autoRecoveryTrigger) {
+      await triggerSentinelAutoRecovery(autoRecoveryTrigger, autoRecoveryDetails);
+    }
     beatInProgress = false;
   }
 }

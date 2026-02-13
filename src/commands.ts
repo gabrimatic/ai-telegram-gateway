@@ -403,6 +403,55 @@ export function buildHelpText(options: {
   return lines.join("\n");
 }
 
+async function resetSessionAndMaybeSendPrompt(ctx: Context, firstPrompt: string): Promise<void> {
+  const trimmedPrompt = firstPrompt.trim();
+
+  await ctx.reply("Clearing session... \u{1F9F9}\u{2728}");
+
+  // Step 1: Stop the managed session gracefully
+  stopSession();
+
+  // Step 2: Kill any orphaned provider processes (SIGTERM first for graceful shutdown)
+  const providerConfig = getProviderProcessConfig(getConfiguredProviderName(), {
+    mcpConfigPath: getConfig().mcpConfigPath,
+  });
+  if (providerConfig.clearSessionProcessPattern) {
+    try {
+      safeExec(
+        `pkill -TERM -f '${providerConfig.clearSessionProcessPattern}' 2>/dev/null || true`
+      );
+    } catch {
+      // Ignore pkill errors
+    }
+  }
+
+  // Step 3: Wait briefly for graceful shutdown
+  await new Promise(resolve => setTimeout(resolve, 500));
+
+  // Step 4: Force kill any remaining processes (SIGKILL)
+  if (providerConfig.clearSessionProcessPattern) {
+    try {
+      safeExec(
+        `pkill -KILL -f '${providerConfig.clearSessionProcessPattern}' 2>/dev/null || true`
+      );
+    } catch {
+      // Ignore pkill errors
+    }
+  }
+
+  // Step 5: Wait for cleanup
+  await new Promise(resolve => setTimeout(resolve, 200));
+
+  // Step 6: Start fresh session
+  await restartSession();
+  await ctx.reply("Fresh start! \u{1F31F} Previous conversation is gone, but your schedules are still safe \u{1F4BE}");
+
+  if (trimmedPrompt) {
+    await ctx.reply("Sending your first message in the fresh session...");
+    await forwardToClaude(ctx, trimmedPrompt);
+  }
+}
+
 export async function handleCommand(
   ctx: Context,
   command: string,
@@ -494,45 +543,7 @@ export async function handleCommand(
     }
 
     case "clear": {
-      await ctx.reply("Clearing session... \u{1F9F9}\u{2728}");
-
-      // Step 1: Stop the managed session gracefully
-      stopSession();
-
-      // Step 2: Kill any orphaned provider processes (SIGTERM first for graceful shutdown)
-      const providerConfig = getProviderProcessConfig(getConfiguredProviderName(), {
-        mcpConfigPath: getConfig().mcpConfigPath,
-      });
-      if (providerConfig.clearSessionProcessPattern) {
-        try {
-          safeExec(
-            `pkill -TERM -f '${providerConfig.clearSessionProcessPattern}' 2>/dev/null || true`
-          );
-        } catch {
-          // Ignore pkill errors
-        }
-      }
-
-      // Step 3: Wait briefly for graceful shutdown
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-      // Step 4: Force kill any remaining processes (SIGKILL)
-      if (providerConfig.clearSessionProcessPattern) {
-        try {
-          safeExec(
-            `pkill -KILL -f '${providerConfig.clearSessionProcessPattern}' 2>/dev/null || true`
-          );
-        } catch {
-          // Ignore pkill errors
-        }
-      }
-
-      // Step 5: Wait for cleanup
-      await new Promise(resolve => setTimeout(resolve, 200));
-
-      // Step 6: Start fresh session
-      await restartSession();
-      await ctx.reply("Fresh start! \u{1F31F} Previous conversation is gone, but your schedules are still safe \u{1F4BE}");
+      await resetSessionAndMaybeSendPrompt(ctx, args);
       return true;
     }
 
@@ -1089,6 +1100,7 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
         lines.push("");
         lines.push(`Interval: ${config.sentinel.intervalMinutes}m`);
         lines.push(`Active hours: ${config.sentinel.activeHoursStart}:00-${config.sentinel.activeHoursEnd}:00 (${config.sentinel.timezone})`);
+        lines.push("Auto-fix: on (runtime/gateway alerts trigger self-heal)");
         lines.push(`Checklist: ${hbStatus.checklistExists ? "found" : "not found"}`);
         if (hbStatus.lastBeatTime) {
           lines.push(`Last beat: ${hbStatus.lastBeatTime.toLocaleString("en-GB", { timeZone: config.sentinel.timezone, dateStyle: "short", timeStyle: "short" })}`);
@@ -1533,7 +1545,10 @@ Or pass an absolute path.`, { parse_mode: "Markdown" });
     // ============ SESSION MANAGEMENT COMMANDS ============
 
     case "session": {
-      const sessionSub = args.trim().toLowerCase();
+      const sessionArgs = args.trim();
+      const sessionParts = sessionArgs ? sessionArgs.split(/\s+/) : [];
+      const sessionSub = sessionParts[0]?.toLowerCase() || "";
+      const firstPrompt = sessionParts.slice(1).join(" ");
       const sessionKeyboard = new InlineKeyboard()
         .text("\uD83D\uDD04 Refresh", "session_status")
         .text("\u{1F504} New", "session_new")
@@ -1584,11 +1599,15 @@ Or pass an absolute path.`, { parse_mode: "Markdown" });
         await new Promise(resolve => setTimeout(resolve, 500));
         await restartSession();
         await ctx.reply(`${ICONS.success} New session started!`);
+        if (firstPrompt.trim()) {
+          await ctx.reply("Sending your first message in the fresh session...");
+          await forwardToClaude(ctx, firstPrompt);
+        }
         return true;
       }
 
       // Unknown subcommand - show usage
-      await ctx.reply(`\u{1F5A5} *Session Commands:*\n\`/session\` - Show status\n\`/session kill\` - Force kill\n\`/session new\` - Fresh session`, { parse_mode: "Markdown" });
+      await ctx.reply(`\u{1F5A5} *Session Commands:*\n\`/session\` - Show status\n\`/session kill\` - Force kill\n\`/session new [message]\` - Fresh session (optionally auto-send first message)`, { parse_mode: "Markdown" });
       return true;
     }
 

@@ -47,6 +47,10 @@ Shows gateway health stats summary.
 ### `/clear`
 
 Stops current AI session, kills provider leftovers, and starts a fresh session.
+In command menu metadata, description includes "new" so session reset is easier
+to discover while searching.
+If you pass text (for example `/clear summarize yesterday`), that text is auto-sent
+as the first prompt in the fresh session.
 
 ### `/id`
 
@@ -72,11 +76,12 @@ Shows process uptime and start timestamp.
 - `on`: enable OpenAI TTS output.
 - `off`: disable TTS output.
 
-### `/session [status|kill|new]`
+### `/session [status|kill|new [message...]]`
 
 - No args or `status`: show current session state and counters.
 - `kill`: force-kill current session and provider process.
 - `new`: start a fresh session.
+- `new <message...>`: start a fresh session and auto-send that message first.
 
 ## Productivity
 
@@ -222,7 +227,7 @@ Manages the predefined random check-in preset:
 
 ### `/sentinel`
 
-Shows sentinel status and recent beat history.
+Shows sentinel status, auto-fix mode, and recent beat history.
 
 ### `/sentinel on`
 
@@ -234,7 +239,7 @@ Stops sentinel timer loop.
 
 ### `/sentinel run`
 
-Triggers one immediate sentinel execution.
+Triggers one immediate sentinel execution, including runtime/gateway auto-fix checks when applicable.
 
 ### `/sentinel edit`
 
@@ -310,6 +315,7 @@ The bot also handles inline button callback actions:
 - translate language shortcuts
 - model selection buttons
 - session quick actions
+- AI response actions (`ai_regen_*`, `ai_short_*`, `ai_deep_*`) and context (`ai_ctx_*`)
 - reboot confirm or cancel
 
 Callback handlers are wired in:

@@ -5,6 +5,7 @@ type ActionName = "regen" | "short" | "deep";
 interface ActionContext {
   userId: string;
   prompt: string;
+  responseContext?: string;
   createdAt: number;
 }
 
@@ -48,7 +49,7 @@ function trimToLimit(): void {
   }
 }
 
-export function createActionContext(userId: string, prompt: string): string {
+export function createActionContext(userId: string, prompt: string, responseContext?: string): string {
   cleanupExpiredContexts();
 
   let token = randomToken();
@@ -59,6 +60,7 @@ export function createActionContext(userId: string, prompt: string): string {
   contexts.set(token, {
     userId,
     prompt,
+    responseContext,
     createdAt: Date.now(),
   });
   latestTokenByUser.set(userId, token);
@@ -115,10 +117,23 @@ export function buildActionPrompt(action: ActionName, basePrompt: string): strin
   }
 }
 
-export function buildActionKeyboard(token: string): InlineKeyboard {
-  return new InlineKeyboard()
-    .text("\u{1F501} Again", `ai_regen_${token}`)
-    .text("\u2702\uFE0F Shorter", `ai_short_${token}`)
-    .row()
-    .text("\u{1F9E0} Deeper", `ai_deep_${token}`);
+export function buildActionKeyboard(
+  token: string,
+  options?: { includePromptActions?: boolean }
+): InlineKeyboard {
+  const includePromptActions = options?.includePromptActions ?? true;
+  const keyboard = new InlineKeyboard();
+
+  if (includePromptActions) {
+    keyboard
+      .text("\u{1F501} Again", `ai_regen_${token}`)
+      .text("\u2702\uFE0F Shorter", `ai_short_${token}`)
+      .row()
+      .text("\u{1F9E0} Deeper", `ai_deep_${token}`)
+      .text("\u2139\uFE0F Context", `ai_ctx_${token}`);
+    return keyboard;
+  }
+
+  keyboard.text("\u2139\uFE0F Context", `ai_ctx_${token}`);
+  return keyboard;
 }
