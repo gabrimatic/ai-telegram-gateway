@@ -3,7 +3,7 @@ import { execSync } from "child_process";
 import * as fs from "fs";
 import { env } from "./env";
 import { loadConfig, getConfigPath } from "./config";
-import { initLogger, info, error, getLogDir, startLogMaintenance, stopLogMaintenance } from "./logger";
+import { initLogger, info, warn, error, getLogDir, startLogMaintenance, stopLogMaintenance } from "./logger";
 import { startHealthMonitor, stopHealthMonitor, getStats, formatStats } from "./health";
 import { startScheduler, stopScheduler, triggerDailyReset } from "./scheduler";
 import { saveSessionSummary } from "./memory";
@@ -22,6 +22,7 @@ import { initAnalytics, stopAnalytics } from "./analytics";
 import { startWatchdog, stopWatchdog } from "./watchdog";
 import { initSentinel, stopSentinel } from "./sentinel";
 import { checkPostDeployHealth, checkRollbackNeeded } from "./deployer";
+import { checkAuthStatus, enterDegradedMode, startPeriodicAuthCheck, stopPeriodicAuthCheck } from "./ai/auth-check";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
@@ -188,6 +189,14 @@ async function main(): Promise<void> {
   await startServices();
   startServiceHealthMonitor();
 
+  // Proactive auth check - enter degraded mode at startup if CLI is not authenticated.
+  // Periodic checks will auto-recover when auth is restored.
+  if (!checkAuthStatus()) {
+    warn("daemon", "startup_auth_failed");
+    enterDegradedMode("CLI not authenticated at startup");
+  }
+  startPeriodicAuthCheck();
+
   // Create bot
   const bot = await createBot(TELEGRAM_BOT_TOKEN);
 
@@ -244,6 +253,7 @@ async function main(): Promise<void> {
     }
 
     // Stop all components
+    stopPeriodicAuthCheck();
     stopSentinel();
     stopWatchdog();
     stopTaskScheduler();

@@ -10,6 +10,7 @@ import { join } from "path";
 import { homedir } from "os";
 import { info, warn, error as logError, debug } from "./logger";
 import { restartSession, isSessionAlive } from "./ai";
+import { enterDegradedMode } from "./ai/auth-check";
 import { getMemoryUsage, getDiskUsage } from "./resource-monitor";
 import { getConfig } from "./config";
 import { sendAdminAlert, AlertCategory } from "./alerting";
@@ -136,6 +137,18 @@ async function triggerPatternRecovery(errorType: string, count: number): Promise
   setCooldown(recoveryKey);
 
   switch (errorType) {
+    case "auth_required":
+      // Auth failures are NOT fixed by session restarts.
+      // Enter degraded mode instead; periodic auth check will recover.
+      enterDegradedMode(`repeated auth failures (${count}x in 10min)`);
+      await sendAdminAlert(
+        `Repeated auth failures: ${count}x in 10 minutes. Gateway entering degraded mode.`,
+        "critical",
+        "service_down"
+      );
+      logRecovery(`repeated_${errorType}`, "degraded_mode", true);
+      break;
+
     case "timeout":
     case "process_crash":
     case "unknown":

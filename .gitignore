@@ -46,7 +46,11 @@ temp/
 *.tmp
 .code-review-*.md
 
-# Credentials that may leak from child CLI sessions
-.credentials.json
-.claude.json
-.claude.json.backup.*
+# Credentials that may leak from child CLI sessions (recursive)
+**/.credentials.json
+**/.claude.json
+**/.claude.json.backup.*
+
+# Escape-code directory junk from child CLI sessions
+\x1b[*
+\033[*

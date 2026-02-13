@@ -7,6 +7,7 @@ import * as fs from "fs";
 import { Bot, Context } from "grammy";
 import { runAI, getStats, isSessionStuck, isSessionRestarting, restartSession, getSessionId } from "./ai";
 import { isAuthFailureText } from "./ai/auth-failure";
+import { isDegradedMode } from "./ai/auth-check";
 import { getConfig } from "./config";
 import { info, warn, error, debug } from "./logger";
 import { incrementMessages, incrementErrors } from "./health";
@@ -59,13 +60,8 @@ async function respondBackendAuthFailure(
 ): Promise<void> {
   streamHandler.cleanup();
 
-  if (!isSessionRestarting()) {
-    restartSession().catch((err) => {
-      error("poller", "restart_after_auth_failure_failed", {
-        error: err instanceof Error ? err.message : String(err),
-      }, requestId);
-    });
-  }
+  // Do NOT restart the session on auth failure - restarting won't fix auth.
+  // Degraded mode is entered by auth-check or self-heal; periodic check recovers.
 
   const currentMessageId = streamHandler.getCurrentMessageId();
   if (currentMessageId !== null && ctx.chat) {
@@ -436,6 +432,12 @@ async function handleMessage(ctx: Context): Promise<void> {
     return;
   }
 
+  // Reject messages when auth is broken (degraded mode)
+  if (isDegradedMode()) {
+    await ctx.reply("AI backend is temporarily unavailable (authentication issue). The admin has been notified - try again shortly.");
+    return;
+  }
+
   const requestId = generateRequestId();
   const allowlist = await loadAllowlist();
   const providerName = getProviderDisplayName();
@@ -681,6 +683,13 @@ async function processTextWithClaude(
   }
 ): Promise<void> {
   const requestId = options?.requestId || generateRequestId();
+
+  // Reject when auth is broken
+  if (isDegradedMode()) {
+    await sendErrorResponse(ctx, "AI backend is temporarily unavailable (authentication issue). The admin has been notified - try again shortly.", userId);
+    return;
+  }
+
   const isQueued = aiProcessingCount > 0;
 
   if (!isQueued) {

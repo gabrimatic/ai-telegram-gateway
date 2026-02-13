@@ -4,6 +4,7 @@
  */
 import { homedir } from "os";
 import { join } from "path";
+import { mkdirSync } from "fs";
 
 const HOME = homedir();
 
@@ -44,13 +45,20 @@ export const env = {
   TG_MCP_CONFIG: process.env.TG_MCP_CONFIG || join(PROJECT_DIR, "mcp-config.json"),
   TG_GATEWAY_CONFIG: process.env.TG_GATEWAY_CONFIG || join(PROJECT_DIR, "config", "gateway.json"),
 
-  // Working directory for Claude CLI
-  TG_WORKING_DIR: process.env.TG_WORKING_DIR || HOME,
+  // Working directory for Claude CLI (sandboxed to prevent junk in $HOME)
+  TG_WORKING_DIR: process.env.TG_WORKING_DIR || join(HOME, ".claude", "gateway", "sandbox"),
 
   // Service hosts/ports
   WHISPERKIT_HOST: process.env.WHISPERKIT_HOST || "localhost",
   WHISPERKIT_PORT: parseInt(process.env.WHISPERKIT_PORT || "50060", 10),
 };
+
+// Ensure sandbox directory exists at module load time
+try {
+  mkdirSync(env.TG_WORKING_DIR, { recursive: true });
+} catch {
+  // Best-effort; will fail later if truly broken
+}
 
 // Derived URLs for convenience
 export const WHISPERKIT_BASE_URL = `http://${env.WHISPERKIT_HOST}:${env.WHISPERKIT_PORT}`;

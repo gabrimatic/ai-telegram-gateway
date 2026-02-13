@@ -12,6 +12,7 @@ import { sendAdminAlert, AlertCategory } from "./alerting";
 import { getErrorRate, getDailyAverageErrorRate } from "./analytics";
 import { runSelfHealingChecks } from "./self-heal";
 import { getConfig } from "./config";
+import { checkAuthStatus, isDegradedMode, enterDegradedMode, exitDegradedMode } from "./ai/auth-check";
 
 const execAsync = promisify(exec);
 
@@ -185,6 +186,34 @@ async function checkErrorRateSpike(): Promise<void> {
   }
 }
 
+async function checkAuthHealth(): Promise<void> {
+  try {
+    const isAuthed = checkAuthStatus();
+
+    if (!isAuthed && !isDegradedMode()) {
+      enterDegradedMode("Watchdog auth check failed");
+      await alertIfNotCooling(
+        "auth_expired",
+        "CLI authentication expired. Gateway entering degraded mode.",
+        "critical",
+        "service_down"
+      );
+    } else if (isAuthed && isDegradedMode()) {
+      exitDegradedMode();
+      await alertIfNotCooling(
+        "auth_restored",
+        "CLI authentication restored. Gateway resuming normal operation.",
+        "info",
+        "service_down"
+      );
+    }
+  } catch (err) {
+    debug("watchdog", "auth_check_failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 // --- Watchdog cycle ---
 
 let watchdogCycleInProgress = false;
@@ -209,10 +238,11 @@ async function watchdogCycle(): Promise<void> {
       checkDocker(),
       checkNetworkConnectivity(),
       checkErrorRateSpike(),
+      checkAuthHealth(),
     ]);
 
     // Log any rejected checks for diagnostics
-    const checkNames = ["disk", "memory", "cpu", "pm2", "docker", "network", "errorRate"];
+    const checkNames = ["disk", "memory", "cpu", "pm2", "docker", "network", "errorRate", "auth"];
     for (let i = 0; i < results.length; i++) {
       if (results[i].status === "rejected") {
         const reason = (results[i] as PromiseRejectedResult).reason;

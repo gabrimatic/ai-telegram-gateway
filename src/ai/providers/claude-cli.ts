@@ -8,6 +8,7 @@ import { cleanupSessionFiles } from "../../files";
 import { CircuitBreaker, CircuitBreakerError } from "../../circuit-breaker";
 import { sendAdminAlert } from "../../alerting";
 import { isAuthFailureText } from "../auth-failure";
+import { isDegradedMode, enterDegradedMode } from "../auth-check";
 import type { AIBackend, AIResponse, AIStats } from "../types";
 
 interface ContentBlock {
@@ -136,6 +137,9 @@ class ClaudeSession extends EventEmitter {
     const filteredEnv = { ...process.env };
     delete filteredEnv.CLAUDECODE;
     delete filteredEnv.CLAUDE_CODE_ENTRYPOINT;
+    delete filteredEnv.INIT_CWD;
+    delete filteredEnv.PWD;
+    delete filteredEnv.OLDPWD;
 
     this.proc = spawn(
       claudePath,
@@ -594,10 +598,11 @@ class ClaudeSession extends EventEmitter {
   }
 
   private markAuthFailureIfDetected(text: string): void {
-    if (this.authFailureDetected || !isAuthFailureText(text)) {
-      return;
-    }
+    // Once buffer has real content, stop checking for auth errors
+    if (this.authFailureDetected || text.length > 200) return;
+    if (!isAuthFailureText(text)) return;
     this.authFailureDetected = true;
+    enterDegradedMode("Auth failure detected in session response");
     warn("claude", "auth_failure_detected", { sessionId: this.sessionId });
     void sendAdminAlert(
       "Gateway AI backend auth expired. Re-authenticate the CLI on the host to restore replies.",
@@ -646,6 +651,15 @@ export async function runClaude(
   message: string,
   onChunk?: (text: string) => Promise<void>
 ): Promise<AIResponse> {
+  // Reject immediately if auth is known to be broken
+  if (isDegradedMode()) {
+    return {
+      success: false,
+      response: "",
+      error: "AI backend authentication is unavailable (degraded mode). Admin must re-authenticate the CLI.",
+    };
+  }
+
   // Check circuit breaker state
   const breakerState = claudeCircuitBreaker.getState();
   if (breakerState === "open") {
