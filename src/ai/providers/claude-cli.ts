@@ -69,9 +69,14 @@ class ClaudeSession extends EventEmitter {
   private lastActivityTime: number = Date.now();
   private healthCheckTimer: NodeJS.Timeout | null = null;
   private model: ModelName;
-  private totalInputTokens: number = 0;
-  private totalOutputTokens: number = 0;
-  private contextWindow: number = 200000;
+  private totalInputTokens: number = 0; // Legacy: last turn input tokens
+  private totalOutputTokens: number = 0; // Legacy: last turn output tokens
+  private contextWindow: number = 200000; // Legacy: last known context window
+  private lastInputTokens: number | undefined = undefined;
+  private lastOutputTokens: number | undefined = undefined;
+  private lastContextWindow: number | undefined = undefined;
+  private sessionInputTokensTotal: number = 0;
+  private sessionOutputTokensTotal: number = 0;
 
   constructor(model: ModelName) {
     super();
@@ -292,15 +297,33 @@ class ClaudeSession extends EventEmitter {
       if (msg.type === "result") {
         // Capture token usage
         if (msg.usage) {
-          this.totalInputTokens = (msg.usage.input_tokens || 0) +
+          const inputTokens = (msg.usage.input_tokens || 0) +
             (msg.usage.cache_creation_input_tokens || 0) +
             (msg.usage.cache_read_input_tokens || 0);
-          this.totalOutputTokens = msg.usage.output_tokens || 0;
+          const outputTokens = msg.usage.output_tokens || 0;
+
+          this.lastInputTokens = inputTokens;
+          this.lastOutputTokens = outputTokens;
+          this.sessionInputTokensTotal += inputTokens;
+          this.sessionOutputTokensTotal += outputTokens;
+
+          // Legacy compatibility fields.
+          this.totalInputTokens = inputTokens;
+          this.totalOutputTokens = outputTokens;
+        } else {
+          // Avoid stale "last turn" values when the provider omits usage.
+          this.lastInputTokens = undefined;
+          this.lastOutputTokens = undefined;
+          this.totalInputTokens = 0;
+          this.totalOutputTokens = 0;
         }
+
+        this.lastContextWindow = undefined;
         if (msg.modelUsage) {
           for (const modelInfo of Object.values(msg.modelUsage)) {
             if (modelInfo.contextWindow) {
               this.contextWindow = modelInfo.contextWindow;
+              this.lastContextWindow = modelInfo.contextWindow;
               break;
             }
           }
@@ -517,6 +540,11 @@ class ClaudeSession extends EventEmitter {
       isHealthy,
       lastActivityMs: timeSinceActivity,
       model: this.model,
+      lastInputTokens: this.lastInputTokens,
+      lastOutputTokens: this.lastOutputTokens,
+      lastContextWindow: this.lastContextWindow,
+      sessionInputTokensTotal: this.sessionInputTokensTotal,
+      sessionOutputTokensTotal: this.sessionOutputTokensTotal,
       totalInputTokens: this.totalInputTokens,
       totalOutputTokens: this.totalOutputTokens,
       contextWindow: this.contextWindow,

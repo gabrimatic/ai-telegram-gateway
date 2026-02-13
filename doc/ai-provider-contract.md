@@ -24,6 +24,13 @@ Shared guarantees:
 - Provider-level circuit breakers protect against repeated failures.
 - Timeout failures are surfaced as normal failed responses, not thrown to the poller.
 
+`AIStats` token fields:
+
+- `lastInputTokens` / `lastOutputTokens`: token usage for the most recent completed turn.
+- `sessionInputTokensTotal` / `sessionOutputTokensTotal`: cumulative usage in the current provider session.
+- `lastContextWindow`: context window reported for the most recent turn when available.
+- Legacy compatibility fields (`totalInputTokens`, `totalOutputTokens`, `contextWindow`) are still populated.
+
 ## Claude CLI Provider
 
 Primary file: `src/ai/providers/claude-cli.ts`
@@ -47,7 +54,7 @@ Stream handling:
 - Reads JSON lines from stdout.
 - Collects text from `assistant` messages and `content_block_delta`.
 - Finalizes on `result` event.
-- Tracks token usage from `usage` and context window from `modelUsage`.
+- Tracks last-turn usage from `usage`, cumulative session totals, and context window from `modelUsage` when present.
 
 Failure surfaces:
 
@@ -67,7 +74,7 @@ Session model:
 
 - No persistent process.
 - Spawns a fresh `codex exec` process per request.
-- Keeps virtual session metadata for stats only.
+- Keeps virtual session metadata plus token usage aggregates for stats.
 
 Spawn flags:
 

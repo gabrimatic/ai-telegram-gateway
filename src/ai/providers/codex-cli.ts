@@ -1,7 +1,7 @@
 import { spawn, ChildProcess } from "child_process";
 import * as readline from "readline";
 import { env } from "../../env";
-import { getConfig, ModelName } from "../../config";
+import { ModelName } from "../../config";
 import { info, error as logError, debug } from "../../logger";
 import { CircuitBreaker, CircuitBreakerError } from "../../circuit-breaker";
 import type { AIBackend, AIResponse, AIStats } from "../types";
@@ -42,6 +42,11 @@ let recentFailures = 0;
 let isProcessing = false;
 let lastActivityTime = Date.now();
 let currentProcess: ChildProcess | null = null;
+let lastInputTokens: number | undefined = undefined;
+let lastOutputTokens: number | undefined = undefined;
+let lastContextWindow: number | undefined = undefined;
+let sessionInputTokensTotal = 0;
+let sessionOutputTokensTotal = 0;
 
 // Circuit breaker
 const codexCircuitBreaker = new CircuitBreaker({
@@ -55,6 +60,11 @@ function resetSession(): void {
   sessionStartedAt = new Date();
   messageCount = 0;
   recentFailures = 0;
+  lastInputTokens = undefined;
+  lastOutputTokens = undefined;
+  lastContextWindow = undefined;
+  sessionInputTokensTotal = 0;
+  sessionOutputTokensTotal = 0;
 }
 
 export async function runCodex(
@@ -114,6 +124,23 @@ async function executeCodex(
     let resolved = false;
     let responseBuffer = "";
     let errorMessage = "";
+    let usageSeen = false;
+    let requestInputTokens = 0;
+    let requestOutputTokens = 0;
+
+    const applyRequestUsage = (): void => {
+      if (usageSeen) {
+        lastInputTokens = requestInputTokens;
+        lastOutputTokens = requestOutputTokens;
+        sessionInputTokensTotal += requestInputTokens;
+        sessionOutputTokensTotal += requestOutputTokens;
+      } else {
+        lastInputTokens = undefined;
+        lastOutputTokens = undefined;
+      }
+      // Codex stream does not currently expose context window information.
+      lastContextWindow = undefined;
+    };
 
     const TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -124,6 +151,7 @@ async function executeCodex(
       if (proc) {
         proc.kill("SIGKILL");
       }
+      applyRequestUsage();
       resolve({
         success: false,
         response: "",
@@ -163,6 +191,12 @@ async function executeCodex(
         const msg: CodexStreamMessage = JSON.parse(line);
         debug("codex", "stream_message", { type: msg.type });
 
+        if (msg.usage) {
+          usageSeen = true;
+          requestInputTokens = (msg.usage.input_tokens || 0) + (msg.usage.cached_input_tokens || 0);
+          requestOutputTokens = msg.usage.output_tokens || 0;
+        }
+
         // Agent message with text content
         if (msg.type === "item.completed" && msg.item?.type === "agent_message" && msg.item?.text) {
           const text = msg.item.text;
@@ -192,6 +226,7 @@ async function executeCodex(
           if (!resolved) {
             resolved = true;
             clearTimeout(timeoutId);
+            applyRequestUsage();
             const durationMs = Date.now() - requestStartTime;
             if (responseBuffer.trim()) {
               resolve({
@@ -237,6 +272,7 @@ async function executeCodex(
       if (!resolved) {
         resolved = true;
         clearTimeout(timeoutId);
+        applyRequestUsage();
         const durationMs = Date.now() - requestStartTime;
         if (responseBuffer.trim()) {
           // Process exited but we got content
@@ -262,6 +298,7 @@ async function executeCodex(
         resolved = true;
         clearTimeout(timeoutId);
         logError("codex", "process_error", { error: err.message });
+        applyRequestUsage();
         resolve({
           success: false,
           response: "",
@@ -330,6 +367,15 @@ export function getCodexStats(): AIStats | null {
     isHealthy: !isProcessing || (Date.now() - lastActivityTime < STUCK_THRESHOLD_MS),
     lastActivityMs: Date.now() - lastActivityTime,
     model: currentModel,
+    lastInputTokens,
+    lastOutputTokens,
+    lastContextWindow,
+    sessionInputTokensTotal,
+    sessionOutputTokensTotal,
+    // Legacy compatibility fields (last turn values).
+    totalInputTokens: lastInputTokens,
+    totalOutputTokens: lastOutputTokens,
+    contextWindow: lastContextWindow,
   };
 }
 

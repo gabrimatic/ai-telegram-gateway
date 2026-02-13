@@ -24,9 +24,19 @@ export function buildResponseContextLabel(): string {
   const stats = getAIStats();
   let contextPart: string;
 
-  if (stats?.totalInputTokens && stats.contextWindow) {
-    const used = stats.totalInputTokens + (stats.totalOutputTokens || 0);
-    contextPart = `${formatTokens(used)}/${formatTokens(stats.contextWindow)}`;
+  if (
+    stats?.lastInputTokens !== undefined &&
+    stats.lastContextWindow !== undefined
+  ) {
+    const used = stats.lastInputTokens + (stats.lastOutputTokens || 0);
+    contextPart = `${formatTokens(used)}/${formatTokens(stats.lastContextWindow)}`;
+  } else if (
+    stats?.lastInputTokens !== undefined ||
+    stats?.lastOutputTokens !== undefined
+  ) {
+    const inTokens = stats.lastInputTokens || 0;
+    const outTokens = stats.lastOutputTokens || 0;
+    contextPart = `in:${formatTokens(inTokens)} out:${formatTokens(outTokens)}`;
   } else {
     contextPart = getCurrentModel();
   }

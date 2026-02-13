@@ -99,6 +99,12 @@ npm run dev
 
 ## Runtime configuration
 
+### Prompt envelope and token usage
+
+- The gateway injects a compact system prompt envelope on each AI turn.
+- The envelope is intentionally kept short to reduce repeated token overhead while preserving safety and runtime constraints.
+- Usage stats expose both last-turn token usage and cumulative session totals when providers return usage data.
+
 ### Environment variables
 
 See [`.env.example`](./.env.example) for the full template. Frequently used values:

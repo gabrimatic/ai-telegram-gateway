@@ -20,6 +20,12 @@ export interface AIStats {
   isHealthy: boolean;
   lastActivityMs: number;
   model: ModelName;
+  lastInputTokens?: number;
+  lastOutputTokens?: number;
+  lastContextWindow?: number;
+  sessionInputTokensTotal?: number;
+  sessionOutputTokensTotal?: number;
+  // Legacy compatibility fields. These currently represent last turn values.
   totalInputTokens?: number;
   totalOutputTokens?: number;
   contextWindow?: number;
