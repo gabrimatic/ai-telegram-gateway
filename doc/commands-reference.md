@@ -378,3 +378,9 @@ Callback handlers are wired in:
 
 - `src/poller.ts`
 - `src/callbacks.ts`
+
+Action callback behavior:
+
+- Hidden actions are rejected server-side if callback payload is forged or stale.
+- Callback queries are always answered (`answerCallbackQuery`) on every path.
+- Reply-markup update failures are non-fatal (for deleted/changed messages).

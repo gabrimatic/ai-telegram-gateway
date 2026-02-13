@@ -207,7 +207,7 @@ async function main(): Promise<void> {
   startWatchdog();
 
   // Initialize task scheduler and wire up notifications via bot
-  const botMe = bot.botInfo ?? await bot.api.getMe();
+  const botMe = await bot.api.getMe();
   setTaskNotifier(async (userId: string, message: string) => {
     try {
       await bot.api.sendMessage(userId, message);

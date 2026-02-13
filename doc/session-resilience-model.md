@@ -71,6 +71,19 @@ Pool controls (from `config/gateway.json`):
 - `conversation.idleTtlMinutes` (default: `30`)
 - `conversation.replyContextMaxChars` (default: `500`)
 - `conversation.enableReplyContextInjection` (default: `true`)
+- `responseActions.enabled` (default: `true`)
+- `responseActions.decisionTimeoutMs` (default: `5000`)
+- `responseActions.maxPromptChars` (default: `2000`)
+- `responseActions.maxResponseChars` (default: `4000`)
+
+Response action decision behavior:
+
+1. After a successful response, gateway asks the active model to return a strict
+JSON action set (`regen`, `short`, `deep`) for that response only.
+2. If decision fails for any reason (timeout/process/schema), action set is empty.
+3. `Context` button stays available regardless of decision result.
+4. Typed cues (`again`, `shorter`, `deeper`) remain available even when no action
+buttons are shown.
 
 Eviction behavior:
 

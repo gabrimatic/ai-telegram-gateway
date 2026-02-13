@@ -166,6 +166,7 @@ Notable fields:
   - `security.argValidationMode` (`moderate` or `strict`)
 
 Follow-up action buttons (`Again`, `Shorter`, `Deeper`) are model-decided per response using strict JSON schema output from the active provider CLI. If decision fails, the bot fails closed (no prompt-action buttons). `Context` remains available on every response. Typed cues (`again`, `shorter`, `deeper`) remain globally available.
+Hidden actions are enforced server-side, so forged callback payloads are rejected.
 
 ## Command groups
 
