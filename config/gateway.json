@@ -44,5 +44,13 @@
   "security": {
     "commandWarningsEnabled": true,
     "argValidationMode": "moderate"
+  },
+  "heartbeat": {
+    "enabled": false,
+    "intervalMinutes": 30,
+    "ackMaxChars": 300,
+    "activeHoursStart": 8,
+    "activeHoursEnd": 23,
+    "timezone": "Europe/Berlin"
   }
 }

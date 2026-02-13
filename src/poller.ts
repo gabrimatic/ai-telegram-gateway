@@ -73,6 +73,27 @@ export function getInFlightCount(): number {
 // stuck-detection or session restarts.
 let aiProcessingCount = 0;
 
+/** Check if the AI backend is currently processing user messages. */
+export function isAIBusy(): boolean {
+  return aiProcessingCount > 0;
+}
+
+/**
+ * Atomically check if AI is free and acquire a slot.
+ * Returns true if slot was acquired, false if AI was busy.
+ * Used by heartbeat to prevent races between check and acquire.
+ */
+export function tryAcquireAISlot(): boolean {
+  if (aiProcessingCount > 0) return false;
+  aiProcessingCount++;
+  return true;
+}
+
+/** Release an AI processing slot. */
+export function releaseAISlot(): void {
+  if (aiProcessingCount > 0) aiProcessingCount--;
+}
+
 import {
   handleTimerCallback,
   handleWeatherCallback,

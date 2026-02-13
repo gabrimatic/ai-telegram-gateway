@@ -6,7 +6,7 @@ import { Context, InlineKeyboard } from "grammy";
 import { readFileSync, readdirSync } from "fs";
 import { homedir } from "os";
 import { restartSession, stopSession, getCurrentModel, getStats as getAIStats, getSessionId, isSessionAlive, getCircuitBreakerState, getAIProviderName, switchModel, getAvailableModels, getProviderForModel, isValidModel } from "./ai";
-import { getConfig, ModelName } from "./config";
+import { getConfig, ModelName, updateConfigOnDisk } from "./config";
 import { formatStats, getStartTime, getStats as getHealthStats } from "./health";
 import { ICONS, BOT_VERSION } from "./constants";
 import { getConfiguredProviderName, getProviderDisplayName, getProviderProcessConfig } from "./provider";
@@ -62,6 +62,15 @@ import { checkResources, formatBytes } from "./resource-monitor";
 import { getMetrics } from "./metrics";
 import { formatRecoveryLog, formatErrorPatterns, getRecentErrorPatterns } from "./self-heal";
 import { isWatchdogRunning } from "./watchdog";
+import {
+  isHeartbeatRunning,
+  startHeartbeat,
+  stopHeartbeat,
+  triggerBeat,
+  getHeartbeatStatus,
+  getHeartbeatMdPath,
+  getHeartbeatMdContent,
+} from "./heartbeat";
 import { env } from "./env";
 
 const DANGEROUS_COMMANDS = new Set(["sh", "reboot"]);
@@ -76,6 +85,7 @@ const ADMIN_ONLY_COMMANDS = new Set([
   "find",
   "git",
   "health",
+  "heartbeat",
   "kill",
   "ls",
   "memory",
@@ -149,6 +159,7 @@ export async function handleCommand(
 \uD83D\uDCCB *PRODUCTIVITY*
 /schedule - Scheduled tasks \u{1F4C5}
 /timer - Quick countdown \u{23F1}\u{FE0F}
+/heartbeat - Proactive monitoring \u{1F493}
 
 \uD83C\uDF10 *INFO* _(${providerName}-powered)_
 /weather /define /translate
@@ -736,6 +747,119 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
         msg += `*Completed/Cancelled (${Math.min(inactive.length, 5)}):*\n` + inactive.slice(0, 5).map(formatSchedule).join("\n\n");
       }
       await ctx.reply(msg, { parse_mode: "Markdown" });
+      return true;
+    }
+
+    // ============ HEARTBEAT (PROACTIVE TURN) ============
+
+    case "heartbeat": {
+      const hbArgs = args.trim().toLowerCase();
+      const hbStatus = getHeartbeatStatus();
+      const config = getConfig();
+
+      if (!hbArgs || hbArgs === "status") {
+        const statusIcon = hbStatus.running ? "\u{1F49A}" : "\u{1F6D1}";
+        const lines: string[] = [];
+        lines.push(`${statusIcon} *Heartbeat ${hbStatus.running ? "Active" : "Stopped"}*`);
+        lines.push("");
+        lines.push(`Interval: ${config.heartbeat.intervalMinutes}m`);
+        lines.push(`Active hours: ${config.heartbeat.activeHoursStart}:00-${config.heartbeat.activeHoursEnd}:00 (${config.heartbeat.timezone})`);
+        lines.push(`Checklist: ${hbStatus.checklistExists ? "found" : "not found"}`);
+        if (hbStatus.lastBeatTime) {
+          lines.push(`Last beat: ${hbStatus.lastBeatTime.toLocaleString("en-GB", { timeZone: config.heartbeat.timezone, dateStyle: "short", timeStyle: "short" })}`);
+        }
+        lines.push("");
+
+        if (hbStatus.history.length > 0) {
+          lines.push("*Recent beats:*");
+          const recent = hbStatus.history.slice(-5).reverse();
+          for (const entry of recent) {
+            const icon = entry.result === "ack" ? "\u{2705}" : entry.result === "alert" ? "\u{1F6A8}" : entry.result === "skipped" ? "\u{23ED}" : "\u{274C}";
+            const time = new Date(entry.timestamp).toLocaleString("en-GB", { timeZone: config.heartbeat.timezone, timeStyle: "short" });
+            const dur = entry.durationMs ? ` (${(entry.durationMs / 1000).toFixed(1)}s)` : "";
+            const msg = entry.message ? ` - ${entry.message.substring(0, 60)}` : "";
+            lines.push(`${icon} ${time}${dur}${msg}`);
+          }
+        } else {
+          lines.push("No beat history yet.");
+        }
+
+        await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
+        return true;
+      }
+
+      if (hbArgs === "on") {
+        if (hbStatus.running) {
+          await ctx.reply("\u{1F49A} Heartbeat is already running!");
+          return true;
+        }
+        startHeartbeat();
+        await ctx.reply("\u{1F49A} Heartbeat started! I'll check HEARTBEAT.md every " + config.heartbeat.intervalMinutes + " minutes.");
+        return true;
+      }
+
+      if (hbArgs === "off") {
+        if (!hbStatus.running) {
+          await ctx.reply("\u{1F6D1} Heartbeat is already stopped.");
+          return true;
+        }
+        stopHeartbeat();
+        await ctx.reply("\u{1F6D1} Heartbeat stopped.");
+        return true;
+      }
+
+      if (hbArgs === "run") {
+        if (!hbStatus.checklistExists) {
+          await ctx.reply(`${ICONS.warning} No HEARTBEAT.md found at \`${getHeartbeatMdPath()}\`. Create one first!`, { parse_mode: "Markdown" });
+          return true;
+        }
+        await ctx.reply("\u{1F493} Running heartbeat now...");
+        triggerBeat().catch((err) => {
+          logError("commands", "heartbeat_trigger_error", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+        return true;
+      }
+
+      if (hbArgs === "edit") {
+        const content = getHeartbeatMdContent();
+        if (!content) {
+          await ctx.reply(`No HEARTBEAT.md found at:\n\`${getHeartbeatMdPath()}\`\n\nCreate this file with your checklist items.`, { parse_mode: "Markdown" });
+        } else {
+          const truncated = content.length > 2000 ? content.substring(0, 2000) + "\n...(truncated)" : content;
+          await ctx.reply(`*HEARTBEAT.md*\n\n\`\`\`\n${truncated}\n\`\`\`\n\nEdit at: \`${getHeartbeatMdPath()}\``, { parse_mode: "Markdown" });
+        }
+        return true;
+      }
+
+      if (hbArgs.startsWith("interval")) {
+        const parts = hbArgs.split(/\s+/);
+        const minutes = parseInt(parts[1], 10);
+        if (isNaN(minutes) || minutes < 1 || minutes > 1440) {
+          await ctx.reply(`${ICONS.error} Usage: \`/heartbeat interval <1-1440>\``, { parse_mode: "Markdown" });
+          return true;
+        }
+        config.heartbeat.intervalMinutes = minutes;
+        updateConfigOnDisk(["heartbeat", "intervalMinutes"], minutes);
+        if (hbStatus.running) {
+          stopHeartbeat();
+          startHeartbeat();
+        }
+        await ctx.reply(`\u{2705} Heartbeat interval set to ${minutes} minutes.${hbStatus.running ? " Timer restarted." : ""}`);
+        return true;
+      }
+
+      await ctx.reply(
+        `*Heartbeat Commands:*\n\n` +
+        `/heartbeat - Show status\n` +
+        `/heartbeat on - Start heartbeat\n` +
+        `/heartbeat off - Stop heartbeat\n` +
+        `/heartbeat run - Trigger immediate beat\n` +
+        `/heartbeat edit - Show HEARTBEAT.md\n` +
+        `/heartbeat interval <min> - Change interval`,
+        { parse_mode: "Markdown" }
+      );
       return true;
     }
 

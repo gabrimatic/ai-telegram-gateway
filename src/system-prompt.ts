@@ -149,6 +149,15 @@ export function buildSystemPrompt(
 
   lines.push(
     "",
+    "HEARTBEAT:",
+    "- The bot has a heartbeat system that periodically checks ~/.claude/gateway/HEARTBEAT.md",
+    "- You may receive [HEARTBEAT] prompts - follow the checklist strictly",
+    "- Reply HEARTBEAT_OK if nothing needs attention",
+    ""
+  );
+
+  lines.push(
+    "",
     "SENDING FILES TO USER:",
     "To send any file back to the user, use this EXACT format:",
     buildSendFileTag("/absolute/path/to/file", "optional description"),

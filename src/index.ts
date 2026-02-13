@@ -20,6 +20,7 @@ import { getConfiguredProviderName, getProviderProcessConfig } from "./provider"
 import { initTaskScheduler, stopTaskScheduler, setTaskNotifier, reloadSchedules } from "./task-scheduler";
 import { initAnalytics, stopAnalytics } from "./analytics";
 import { startWatchdog, stopWatchdog } from "./watchdog";
+import { initHeartbeat, stopHeartbeat } from "./heartbeat";
 import { checkPostDeployHealth, checkRollbackNeeded } from "./deployer";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -209,6 +210,19 @@ async function main(): Promise<void> {
   });
   initTaskScheduler();
 
+  // Initialize heartbeat (proactive monitoring)
+  const heartbeatNotifier = async (userId: string, message: string) => {
+    try {
+      await bot.api.sendMessage(userId, message, { parse_mode: "Markdown" });
+    } catch (err) {
+      error("daemon", "heartbeat_notify_failed", {
+        userId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+  initHeartbeat(heartbeatNotifier);
+
   // Handle graceful shutdown
   let isShuttingDown = false;
   const shutdown = async (signal: string) => {
@@ -230,6 +244,7 @@ async function main(): Promise<void> {
     }
 
     // Stop all components
+    stopHeartbeat();
     stopWatchdog();
     stopTaskScheduler();
     stopScheduler();

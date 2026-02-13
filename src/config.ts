@@ -29,6 +29,15 @@ export interface SecurityConfig {
   argValidationMode: "moderate" | "strict";
 }
 
+export interface HeartbeatConfig {
+  enabled: boolean;
+  intervalMinutes: number;
+  ackMaxChars: number;
+  activeHoursStart: number;
+  activeHoursEnd: number;
+  timezone: string;
+}
+
 export interface GatewayConfig {
   debug: boolean;
   aiProvider: string;
@@ -60,6 +69,8 @@ export interface GatewayConfig {
   resources: ResourcesConfig;
   // Command and validation behavior
   security: SecurityConfig;
+  // Heartbeat (proactive turn) settings
+  heartbeat: HeartbeatConfig;
 }
 
 const CONFIG_PATH = env.TG_GATEWAY_CONFIG;
@@ -115,6 +126,14 @@ const DEFAULT_CONFIG: GatewayConfig = {
   security: {
     commandWarningsEnabled: true,
     argValidationMode: "moderate",
+  },
+  heartbeat: {
+    enabled: false,
+    intervalMinutes: 30,
+    ackMaxChars: 300,
+    activeHoursStart: 8,
+    activeHoursEnd: 23,
+    timezone: "Europe/Berlin",
   },
 };
 
@@ -200,6 +219,14 @@ export function loadConfig(): GatewayConfig {
         argValidationMode:
           parsed.security?.argValidationMode === "strict" ? "strict" : DEFAULT_CONFIG.security.argValidationMode,
       },
+      heartbeat: {
+        enabled: parsed.heartbeat?.enabled ?? DEFAULT_CONFIG.heartbeat.enabled,
+        intervalMinutes: parsed.heartbeat?.intervalMinutes ?? DEFAULT_CONFIG.heartbeat.intervalMinutes,
+        ackMaxChars: parsed.heartbeat?.ackMaxChars ?? DEFAULT_CONFIG.heartbeat.ackMaxChars,
+        activeHoursStart: parsed.heartbeat?.activeHoursStart ?? DEFAULT_CONFIG.heartbeat.activeHoursStart,
+        activeHoursEnd: parsed.heartbeat?.activeHoursEnd ?? DEFAULT_CONFIG.heartbeat.activeHoursEnd,
+        timezone: parsed.heartbeat?.timezone ?? DEFAULT_CONFIG.heartbeat.timezone,
+      },
     };
 
     // Validate critical numeric values
@@ -231,4 +258,20 @@ export function getConfig(): GatewayConfig {
 
 export function getConfigPath(): string {
   return CONFIG_PATH;
+}
+
+export function updateConfigOnDisk(path: string[], value: unknown): void {
+  try {
+    const content = existsSync(CONFIG_PATH) ? readFileSync(CONFIG_PATH, "utf-8") : "{}";
+    const json = JSON.parse(content);
+    let target = json;
+    for (let i = 0; i < path.length - 1; i++) {
+      if (!target[path[i]]) target[path[i]] = {};
+      target = target[path[i]];
+    }
+    target[path[path.length - 1]] = value;
+    writeFileSync(CONFIG_PATH, JSON.stringify(json, null, 2));
+  } catch (err) {
+    console.error("[Config] Failed to update config on disk:", err);
+  }
 }
