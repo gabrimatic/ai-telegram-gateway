@@ -43,7 +43,7 @@ From Telegram message to final response:
 5. Response handler starts typing pulses and accumulates chunks.
 6. For private chats with topic mode, response handler sends throttled `sendMessageDraft` updates while text is generated.
 7. Response handler streams user-visible output via message send/edit flow and keeps replies in the incoming message thread when a `message_thread_id` exists.
-8. On finalize, gateway executes `<telegram-api ... />` tags first (admin-only, max 5), then processes `<send-file ... />` tags, then sends cleaned text.
+8. On finalize, gateway executes `<telegram-api ... />` tags first (admin-only, max 20), then processes `<send-file ... />` tags, then sends cleaned text.
 9. Provider returns final result, then response validator evaluates output quality.
 10. Failures are classified and tracked in analytics/self-heal.
 11. User gets final response or clear failure message.

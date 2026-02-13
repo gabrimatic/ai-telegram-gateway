@@ -25,7 +25,7 @@ This project runs as a long-polling daemon on a trusted host machine. It gives y
 - Visual command center (`/menu`) with inline buttons for command groups
 - Predefined random daily check-ins preset (`/schedule checkins`)
 - Admin topic/group controls and generic Telegram API bridge (`/topic`, `/group`, `/tg`)
-- AI-triggered Telegram API calls via `<telegram-api ... />` tags (admin-only, max 5 per response)
+- AI-triggered Telegram API calls via `<telegram-api ... />` tags (admin-only, max 20 per response)
 - 80+ slash commands for productivity, system ops, and monitoring
 - Allowlist and pairing-code access control
 - Circuit breaker, watchdog, analytics, and automatic recovery paths

@@ -404,21 +404,16 @@ export class StreamingResponseHandler {
     }
 
     const cleanedText = execution.cleanedText;
-    const summaryText = execution.summaryLines.length > 0
-      ? `Telegram API actions:\n${execution.summaryLines.join("\n")}`
-      : "";
+    if (execution.summaryLines.length > 0) {
+      info("streaming", "telegram_api_actions_executed", {
+        count: execution.summaryLines.length,
+        summary: execution.summaryLines.join(" | "),
+      });
+    }
     const visibleText = removeFileTags(cleanedText).trim();
 
-    // Build display text: always include action status when tags exist
-    let displayText: string;
-    if (visibleText && summaryText) {
-      displayText = `${visibleText}\n\n${summaryText}`;
-    } else if (summaryText) {
-      displayText = summaryText;
-    } else if (visibleText) {
-      displayText = visibleText;
-    } else {
-      // No visible text and no summary - delete the placeholder message
+    if (!visibleText) {
+      // No visible model text after tag cleanup - delete placeholder message.
       if (this.currentMessageId !== null && this.ctx.chat) {
         try {
           await this.ctx.api.deleteMessage(this.ctx.chat.id, this.currentMessageId);
@@ -430,23 +425,15 @@ export class StreamingResponseHandler {
       return;
     }
 
-    // Persist summary into accumulatedText so processFileTags() preserves it.
-    // accumulatedText keeps file tags for dispatch, plus summary block at the end.
-    if (summaryText) {
-      this.accumulatedText = cleanedText.trim()
-        ? `${cleanedText}\n\n${summaryText}`
-        : summaryText;
-    } else {
-      this.accumulatedText = cleanedText;
-    }
+    this.accumulatedText = cleanedText;
 
     if (this.currentMessageId !== null && this.ctx.chat) {
-      await this.editWithMarkdown(this.ctx.chat.id, this.currentMessageId, displayText);
+      await this.editWithMarkdown(this.ctx.chat.id, this.currentMessageId, visibleText);
     } else {
-      const sent = await this.sendWithMarkdown(displayText);
+      const sent = await this.sendWithMarkdown(visibleText);
       this.currentMessageId = sent.message_id;
     }
-    this.lastSentText = displayText;
+    this.lastSentText = visibleText;
   }
 
   private async performDraft(force: boolean = false): Promise<void> {
@@ -762,15 +749,13 @@ export async function sendResponse(
     messageThreadId: typeof msg?.message_thread_id === "number" ? msg.message_thread_id : undefined,
   });
   const cleanedText = removeTelegramApiTags(apiTagExecution.cleanedText);
-  const summaryText = apiTagExecution.summaryLines.length > 0
-    ? `Telegram API actions:\n${apiTagExecution.summaryLines.join("\n")}`
-    : "";
-  const visibleTextAfterFileTags = removeFileTags(cleanedText).trim();
-  const finalText = visibleTextAfterFileTags && summaryText
-    ? `${cleanedText}\n\n${summaryText}`.trim()
-    : summaryText && !visibleTextAfterFileTags
-      ? `${summaryText}\n${cleanedText}`.trim()
-      : cleanedText;
+  if (apiTagExecution.summaryLines.length > 0) {
+    info("response", "telegram_api_actions_executed", {
+      count: apiTagExecution.summaryLines.length,
+      summary: apiTagExecution.summaryLines.join(" | "),
+    });
+  }
+  const finalText = cleanedText;
 
   if (!finalText || finalText.trim().length === 0) {
     await ctx.reply("(empty response)", buildReplyOptions(ctx) as any);

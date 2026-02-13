@@ -10,6 +10,7 @@ import { sendAdminAlert } from "../../alerting";
 import { isAuthFailureText } from "../auth-failure";
 import { isDegradedMode, enterDegradedMode } from "../auth-check";
 import type { AIBackend, AIResponse, AIStats } from "../types";
+import { buildStaticSystemPrompt } from "../../system-prompt";
 
 interface ContentBlock {
   type: string;
@@ -73,6 +74,7 @@ class ClaudeSession extends EventEmitter {
   private healthCheckTimer: NodeJS.Timeout | null = null;
   private authFailureDetected: boolean = false;
   private model: ModelName;
+  private systemPrompt: string | undefined;
   private totalInputTokens: number = 0; // Legacy: last turn input tokens
   private totalOutputTokens: number = 0; // Legacy: last turn output tokens
   private contextWindow: number = 200000; // Legacy: last known context window
@@ -82,11 +84,12 @@ class ClaudeSession extends EventEmitter {
   private sessionInputTokensTotal: number = 0;
   private sessionOutputTokensTotal: number = 0;
 
-  constructor(model: ModelName) {
+  constructor(model: ModelName, systemPrompt?: string) {
     super();
     this.sessionId = this.generateSessionId();
     this.startedAt = new Date();
     this.model = model;
+    this.systemPrompt = systemPrompt;
     this.startHealthCheck();
   }
 
@@ -141,21 +144,34 @@ class ClaudeSession extends EventEmitter {
     delete filteredEnv.PWD;
     delete filteredEnv.OLDPWD;
 
+    const args = [
+      "--print",
+      "--verbose",
+      "--dangerously-skip-permissions",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--model",
+      this.model,
+      "--mcp-config",
+      config.mcpConfigPath,
+      // Restrict tools to only what the bot needs (saves ~15-20k tokens of tool definitions)
+      "--tools",
+      "Bash,Read,WebSearch,WebFetch",
+      // Skip loading ~/.claude/CLAUDE.md and project CLAUDE.md (saves ~2-3k tokens)
+      "--setting-sources",
+      "",
+    ];
+
+    // Inject system prompt if provided (replaces the CLI's massive default system prompt)
+    if (this.systemPrompt) {
+      args.push("--system-prompt", this.systemPrompt);
+    }
+
     this.proc = spawn(
       claudePath,
-      [
-        "--print",
-        "--verbose",
-        "--dangerously-skip-permissions",
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--model",
-        this.model,
-        "--mcp-config",
-        config.mcpConfigPath,
-      ],
+      args,
       {
         stdio: ["pipe", "pipe", "pipe"],
         cwd: env.TG_WORKING_DIR,
@@ -648,9 +664,16 @@ function ensureCleanupTimer(): void {
   cleanupTimer.unref();
 }
 
+function buildSessionSystemPrompt(): string {
+  const config = getConfig();
+  return buildStaticSystemPrompt({
+    providerDisplayName: config.providerDisplayName,
+  });
+}
+
 function createSessionState(contextKey: string): ClaudeSessionState {
   try {
-    const session = new ClaudeSession(currentModel);
+    const session = new ClaudeSession(currentModel, buildSessionSystemPrompt());
     const state: ClaudeSessionState = {
       session,
       lastActivityMs: Date.now(),
@@ -758,7 +781,7 @@ async function ensureHealthySession(contextKey?: string): Promise<boolean> {
     state.isRestarting = true;
     try {
       state.session.forceKill();
-      state.session = new ClaudeSession(currentModel);
+      state.session = new ClaudeSession(currentModel, buildSessionSystemPrompt());
       await state.session.start();
       state.lastActivityMs = Date.now();
     } finally {

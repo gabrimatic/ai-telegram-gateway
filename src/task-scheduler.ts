@@ -26,6 +26,7 @@ import { getConfig } from "./config";
 import { info, warn, error as logError, debug } from "./logger";
 import { isAdminUser, loadAllowlist } from "./storage";
 import { executeTelegramApiCall, parseTelegramApiPayload, parseTelegramApiTags, removeTelegramApiTags, TelegramApiContextLike } from "./telegram-api-executor";
+import { buildStaticSystemPrompt } from "./system-prompt";
 
 // --- Types ---
 
@@ -839,6 +840,10 @@ async function executeClaudeTask(task: string): Promise<{ output: string; succes
       resolve({ output: output.trim() || "(no output)", success });
     };
 
+    const schedulerSystemPrompt = buildStaticSystemPrompt({
+      providerDisplayName: config.providerDisplayName,
+    });
+
     const proc = spawn(
       claudePath,
       [
@@ -852,6 +857,12 @@ async function executeClaudeTask(task: string): Promise<{ output: string; succes
         config.defaultModel,
         "--mcp-config",
         config.mcpConfigPath,
+        "--tools",
+        "Bash,Read,WebSearch,WebFetch",
+        "--setting-sources",
+        "",
+        "--system-prompt",
+        schedulerSystemPrompt,
       ],
       {
         stdio: ["pipe", "pipe", "pipe"],
@@ -1002,6 +1013,7 @@ async function executeRandomCheckinPlannerTask(userId: string): Promise<{ output
 // --- Output routing ---
 
 async function executePromptTelegramApiTags(schedule: Schedule, output: string): Promise<string> {
+  const tagLimit = 20;
   const tags = parseTelegramApiTags(output);
   if (tags.length === 0) {
     return output;
@@ -1029,7 +1041,7 @@ async function executePromptTelegramApiTags(schedule: Schedule, output: string):
   }
 
   const summaryLines: string[] = [];
-  const executable = tags.slice(0, 5);
+  const executable = tags.slice(0, tagLimit);
   for (let i = 0; i < executable.length; i++) {
     const tag = executable[i];
     const parsedPayload = parseTelegramApiPayload(tag.payload);
@@ -1058,16 +1070,20 @@ async function executePromptTelegramApiTags(schedule: Schedule, output: string):
     }
   }
 
-  if (tags.length > 5) {
-    summaryLines.push(`Ignored ${tags.length - 5} extra tag(s); max 5 per response.`);
+  if (tags.length > tagLimit) {
+    summaryLines.push(`Ignored ${tags.length - tagLimit} extra tag(s); max ${tagLimit} per response.`);
   }
 
-  const summaryText = `Telegram API actions:\n${summaryLines.join("\n")}`;
-  if (!cleanedText.trim()) {
-    return summaryText;
+  if (summaryLines.length > 0) {
+    info("task-scheduler", "telegram_api_actions_executed", {
+      id: schedule.id,
+      userId: schedule.userId,
+      summary: summaryLines.join(" | "),
+    });
   }
 
-  return `${cleanedText.trim()}\n\n${summaryText}`;
+  // Keep user-facing output to model text only.
+  return cleanedText.trim();
 }
 
 /**

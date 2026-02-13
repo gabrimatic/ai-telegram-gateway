@@ -54,7 +54,7 @@ export interface TelegramApiContextLike {
   getChatMember?: (chatId: number | string, userId: number) => Promise<unknown>;
 }
 
-const TAG_LIMIT_PER_RESPONSE = 5;
+const TAG_LIMIT_PER_RESPONSE = 20;
 
 /**
  * Quote-aware scanner that finds `<telegram-api ... />` tags even when
@@ -222,6 +222,58 @@ function compactValue(value: unknown): string {
   return text.length > 140 ? `${text.slice(0, 137)}...` : text;
 }
 
+function toPositiveInteger(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+async function resolveTopicIconEmoji(
+  api: Required<TelegramApiContextLike>,
+  method: string,
+  payload: Record<string, unknown>
+): Promise<void> {
+  if (method !== "createForumTopic" && method !== "editForumTopic") {
+    return;
+  }
+  if (payload.icon_custom_emoji_id) {
+    return;
+  }
+
+  const iconEmoji = typeof payload.icon_emoji === "string"
+    ? payload.icon_emoji.trim()
+    : "";
+  if (!iconEmoji) {
+    return;
+  }
+
+  const iconFetcher = (api.raw as Record<string, unknown>).getForumTopicIconStickers;
+  if (typeof iconFetcher !== "function") {
+    throw new Error("getForumTopicIconStickers is unavailable");
+  }
+
+  const stickersRaw = await (iconFetcher as () => Promise<unknown>)();
+  if (!Array.isArray(stickersRaw)) {
+    throw new Error("Failed to resolve topic icon: unexpected sticker list format");
+  }
+
+  const stickers = stickersRaw as Array<Record<string, unknown>>;
+  const match = stickers.find((sticker) => sticker?.emoji === iconEmoji);
+  if (!match || typeof match.custom_emoji_id !== "string" || !match.custom_emoji_id.trim()) {
+    throw new Error(`No custom icon found for emoji '${iconEmoji}'. Use /topic icons to list available topic emojis.`);
+  }
+
+  payload.icon_custom_emoji_id = match.custom_emoji_id;
+  delete payload.icon_emoji;
+}
+
 function summarizeResult(method: string, result: unknown): string {
   if (typeof result === "boolean") {
     return `${method} returned ${result ? "ok" : "false"}`;
@@ -373,14 +425,19 @@ export function parseTelegramApiTags(text: string): TelegramApiTag[] {
 export function removeTelegramApiTags(text: string): string {
   if (!text) return text;
   const scanned = scanTelegramApiTags(text);
-  if (scanned.length === 0) return text;
-
-  // Remove tags in reverse order to preserve indices
   let result = text;
-  for (let i = scanned.length - 1; i >= 0; i--) {
-    const { raw, index } = scanned[i];
-    result = result.slice(0, index) + result.slice(index + raw.length);
+
+  if (scanned.length > 0) {
+    // Remove tags in reverse order to preserve indices.
+    for (let i = scanned.length - 1; i >= 0; i--) {
+      const { raw, index } = scanned[i];
+      result = result.slice(0, index) + result.slice(index + raw.length);
+    }
   }
+
+  // Fallback scrub for malformed/unclosed telegram-api tags so raw control markup
+  // never leaks to users.
+  result = result.replace(/<telegram-api\b[^>]*>/gi, "");
   return result.trim();
 }
 
@@ -455,6 +512,11 @@ export async function executeTelegramApiCall(
   }
 
   try {
+    await resolveTopicIconEmoji(api, resolvedMethodKey, payload);
+    const normalizedThreadId = toPositiveInteger(payload.message_thread_id);
+    if (normalizedThreadId !== null) {
+      payload.message_thread_id = normalizedThreadId;
+    }
     await assertBotRightsForMethod(api, resolvedMethodKey, payload, meta);
     const payloadKeys = Object.keys(payload);
     const result = payloadKeys.length > 0
@@ -479,6 +541,50 @@ export async function executeTelegramApiCall(
     };
   } catch (err) {
     const parsed = parseTelegramError(err);
+
+    // Retry topic-thread operations once with current thread context if Telegram
+    // reports an invalid topic identifier and we have a valid runtime thread id.
+    const runtimeThreadId = toPositiveInteger(meta.messageThreadId);
+    const payloadThreadId = toPositiveInteger(payload.message_thread_id);
+    const descriptionText = typeof parsed.description === "string"
+      ? parsed.description
+      : "";
+    const has400Status = parsed.code === 400 || /^\s*400\b/i.test(descriptionText);
+    const shouldRetryWithContextThread = has400Status
+      && descriptionText.toLowerCase().includes("invalid forum topic identifier")
+      && THREAD_CONTEXT_METHODS.has(resolvedMethodKey)
+      && runtimeThreadId !== null
+      && payloadThreadId !== runtimeThreadId;
+
+    if (shouldRetryWithContextThread) {
+      try {
+        const retryPayload = {
+          ...payload,
+          message_thread_id: runtimeThreadId,
+        };
+        const retryResult = await (rawMethod as (data: Record<string, unknown>) => Promise<unknown>)(retryPayload);
+        const retrySummary = summarizeResult(resolvedMethodKey, retryResult);
+        info("telegram-api", "telegram_api_call_retry_with_context_thread", {
+          callerType: meta.callerType,
+          method: resolvedMethodKey,
+          chatId,
+          userId: meta.userId,
+          contextThreadId: runtimeThreadId,
+          originalThreadId: payloadThreadId,
+          success: true,
+        });
+        return {
+          success: true,
+          method: resolvedMethodKey,
+          payload: retryPayload,
+          result: retryResult,
+          summary: `${retrySummary} (retried with current thread context)`,
+        };
+      } catch {
+        // Fall through to the original error response.
+      }
+    }
+
     const failure: TelegramApiExecutionResult = {
       success: false,
       method: resolvedMethodKey,

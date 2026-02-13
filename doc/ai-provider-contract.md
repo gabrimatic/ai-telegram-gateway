@@ -26,7 +26,7 @@ Shared guarantees:
 - Providers may ignore `contextKey` when they do not support true context sessions.
 - Providers may return structured gateway tags in plain text. The gateway handles:
   - `<send-file ... />` for file delivery
-  - `<telegram-api method=\"...\" payload='{\"...\":...}' />` for Telegram Bot API calls (admin-only, max 5 per response)
+  - `<telegram-api method=\"...\" payload='{\"...\":...}' />` for Telegram Bot API calls (admin-only, max 20 per response)
 - Follow-up response actions (`Again`, `Shorter`, `Deeper`) are decided separately via strict structured-output calls.
 
 ## Response Action Decision Contract

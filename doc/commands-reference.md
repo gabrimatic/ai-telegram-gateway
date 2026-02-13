@@ -170,7 +170,6 @@ Behavior:
 - Dispatches to dynamic `ctx.api.raw[method](payload)`.
 - Method names are case-insensitive (e.g., `createforumtopic` resolves to `createForumTopic`).
 - When called via model `<telegram-api>` tags, `chat_id` and `message_thread_id` are auto-filled from the current conversation context if omitted.
-- Action results are always shown to the user as a compact status block, even when the model includes other text.
 - Returns clear parse errors, unknown-method errors, and Telegram API errors.
 - Admin-only; no per-method allowlist for admin users.
 
