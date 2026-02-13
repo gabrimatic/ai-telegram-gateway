@@ -9,6 +9,7 @@ import { restartSession, stopSession, getCurrentModel, getStats as getAIStats, g
 import { getConfig, ModelName, updateConfigOnDisk } from "./config";
 import { formatStats, getStartTime, getStats as getHealthStats } from "./health";
 import { ICONS, BOT_VERSION } from "./constants";
+import { getKnownTopics } from "./topic-registry";
 import { getConfiguredProviderName, getProviderDisplayName, getProviderProcessConfig } from "./provider";
 import {
   loadAllowlist,
@@ -905,6 +906,7 @@ export async function handleCommand(
       if (!sub) {
         await ctx.reply(
           "Usage:\n" +
+          "`/topic list`\n" +
           "`/topic create <name>`\n" +
           "`/topic edit <thread_id> <new_name>`\n" +
           "`/topic close [thread_id]`\n" +
@@ -922,6 +924,20 @@ export async function handleCommand(
       if (sub === "icons") {
         const execution = await runTelegramCommandCall(ctx, userId!, "getForumTopicIconStickers", {});
         await ctx.reply(execution.message);
+        return true;
+      }
+
+      if (sub === "list") {
+        const topics = getKnownTopics(chatId);
+        if (topics.length === 0) {
+          await ctx.reply("No topics tracked yet. Topics are discovered from incoming messages.");
+          return true;
+        }
+        const lines = topics.map(t => {
+          const icon = t.iconEmoji ? `${t.iconEmoji} ` : "";
+          return `#${t.threadId} - ${icon}${t.name}`;
+        });
+        await ctx.reply(`📋 Known topics:\n\n${lines.join("\n")}`);
         return true;
       }
 

@@ -42,6 +42,9 @@ export function buildStaticSystemPrompt(options: SystemPromptOptions = {}): stri
     "  Do not ask for chat_id or thread_id before first attempt; use conversation context.",
     "  If user says 'fix inbox topic' and gives no specifics, default to name 'Inbox' with icon_emoji '📬'.",
     "  Ask follow-up only after an attempted action fails due to missing/invalid target context.",
+    "  You can ONLY perform Telegram actions by emitting `<telegram-api>` tags. If your response contains no tag, no action happened. Never claim you performed an action without the tag.",
+    "  If you lack information (e.g., thread IDs, chat details), say so honestly. Do not guess or fabricate.",
+    "  In group/supergroup context, 'topics' means Telegram forum topics (threads), not memory or conversation subjects.",
     "- Do not claim memory across sessions beyond context provided.",
     "- Correctness over speed. Facts vs assumptions. Answer first, details after.",
     "",
@@ -69,7 +72,8 @@ export function buildStaticSystemPrompt(options: SystemPromptOptions = {}): stri
  */
 export function buildDynamicContext(
   context: SessionContext,
-  memoryContext?: string
+  memoryContext?: string,
+  topicContext?: string
 ): string {
   const parts: string[] = [];
 
@@ -93,6 +97,10 @@ export function buildDynamicContext(
   if (memoryContext?.trim()) meta.push(`memory: ${memoryContext.trim()}`);
   if (meta.length > 0) parts.push(`[${meta.join(" | ")}]`);
 
+  if (topicContext?.trim()) {
+    parts.push(topicContext.trim());
+  }
+
   return parts.length > 0 ? parts.join("\n") + "\n\n" : "";
 }
 
@@ -103,9 +111,10 @@ export function buildDynamicContext(
 export function buildSystemPrompt(
   context: SessionContext,
   memoryContext?: string,
-  options: SystemPromptOptions = {}
+  options: SystemPromptOptions = {},
+  topicContext?: string
 ): string {
-  return buildDynamicContext(context, memoryContext);
+  return buildDynamicContext(context, memoryContext, topicContext);
 }
 
 export function wrapWithSystemPrompt(

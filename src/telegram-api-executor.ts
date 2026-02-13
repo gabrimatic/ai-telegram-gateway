@@ -1,6 +1,7 @@
 import { GrammyError } from "grammy";
 import { error as logError, info, warn } from "./logger";
 import { isAdminUser, loadAllowlist } from "./storage";
+import { registerTopic, removeTopic } from "./topic-registry";
 
 export type TelegramApiCallerType = "command" | "model_tag" | "scheduler";
 
@@ -530,6 +531,25 @@ export async function executeTelegramApiCall(
       ? await (rawMethod as (data: Record<string, unknown>) => Promise<unknown>)(payload)
       : await (rawMethod as () => Promise<unknown>)();
     const summary = summarizeResult(resolvedMethodKey, result);
+
+    // Update topic registry on create/delete
+    if (resolvedMethodKey === "createForumTopic" && result && typeof result === "object") {
+      const topicResult = result as Record<string, unknown>;
+      const topicChatId = getChatIdFromPayload(payload, meta.chatId);
+      const threadId = typeof topicResult.message_thread_id === "number" ? topicResult.message_thread_id : null;
+      const topicName = typeof payload.name === "string" ? payload.name : "";
+      const topicIcon = typeof payload.icon_emoji === "string" ? payload.icon_emoji : undefined;
+      if (topicChatId && threadId && topicName) {
+        registerTopic(Number(topicChatId), threadId, topicName, topicIcon);
+      }
+    }
+    if (resolvedMethodKey === "deleteForumTopic") {
+      const topicChatId = getChatIdFromPayload(payload, meta.chatId);
+      const threadId = typeof payload.message_thread_id === "number" ? payload.message_thread_id : null;
+      if (topicChatId && threadId) {
+        removeTopic(Number(topicChatId), threadId);
+      }
+    }
 
     info("telegram-api", "telegram_api_call", {
       callerType: meta.callerType,

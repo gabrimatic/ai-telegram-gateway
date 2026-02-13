@@ -45,6 +45,7 @@ import {
   FileType,
   MAX_DOWNLOAD_SIZE,
 } from "./files";
+import { registerTopicFromMessage, formatTopicsForContext } from "./topic-registry";
 
 // Fallback messages when the AI provider is unavailable
 function getFallbackRestartingMessage(): string {
@@ -465,6 +466,11 @@ async function handleMessage(ctx: Context): Promise<void> {
   const messageText = ctx.message?.text;
   const conversationKey = getConversationKeyFromContext(ctx);
 
+  // Register topic info from incoming messages
+  if (ctx.chat?.id && ctx.message) {
+    registerTopicFromMessage(ctx.chat.id, ctx.message);
+  }
+
   if (!userId || !messageText) {
     return;
   }
@@ -619,9 +625,10 @@ async function handleMessage(ctx: Context): Promise<void> {
         recentFailures: stats?.recentFailures ?? 0,
       };
       const memoryContext = loadMemoryContext();
+      const topicContext = ctx.chat?.id ? formatTopicsForContext(ctx.chat.id) : "";
       const systemPrompt = buildSystemPrompt(context, memoryContext, {
         providerDisplayName: config.providerDisplayName,
-      });
+      }, topicContext);
       prompt = wrapWithSystemPrompt(systemPrompt, modelInput);
     }
 
@@ -776,9 +783,10 @@ async function processTextWithClaude(
         isTTSEnabled: isTTSOutputEnabled(),
       };
       const memoryContext = loadMemoryContext();
+      const topicContext = ctx.chat?.id ? formatTopicsForContext(ctx.chat.id) : "";
       const systemPrompt = buildSystemPrompt(context, memoryContext, {
         providerDisplayName: config.providerDisplayName,
-      });
+      }, topicContext);
       prompt = wrapWithSystemPrompt(systemPrompt, modelInput);
     }
 
