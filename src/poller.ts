@@ -623,6 +623,9 @@ async function handleMessage(ctx: Context): Promise<void> {
       const context: SessionContext = {
         messageCount: stats?.messageCount ?? 0,
         recentFailures: stats?.recentFailures ?? 0,
+        chatId: ctx.chat?.id,
+        chatType: ctx.chat?.type,
+        messageThreadId: (ctx.msg as any)?.message_thread_id,
       };
       const memoryContext = loadMemoryContext();
       const topicContext = ctx.chat?.id ? formatTopicsForContext(ctx.chat.id) : "";
@@ -781,6 +784,9 @@ async function processTextWithClaude(
         isVoiceInput: options?.isVoiceInput,
         hasFileAttachment: options?.hasFileAttachment,
         isTTSEnabled: isTTSOutputEnabled(),
+        chatId: ctx.chat?.id,
+        chatType: ctx.chat?.type,
+        messageThreadId: (ctx.msg as any)?.message_thread_id,
       };
       const memoryContext = loadMemoryContext();
       const topicContext = ctx.chat?.id ? formatTopicsForContext(ctx.chat.id) : "";

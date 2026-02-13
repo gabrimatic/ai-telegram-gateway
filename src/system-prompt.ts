@@ -7,6 +7,9 @@ export interface SessionContext {
   isVoiceInput?: boolean;
   hasFileAttachment?: boolean;
   isTTSEnabled?: boolean;
+  chatId?: number | string;
+  chatType?: string;
+  messageThreadId?: number;
 }
 
 export interface SystemPromptOptions {
@@ -43,7 +46,6 @@ export function buildStaticSystemPrompt(options: SystemPromptOptions = {}): stri
     "  If user says 'fix inbox topic' and gives no specifics, default to name 'Inbox' with icon_emoji '📬'.",
     "  Ask follow-up only after an attempted action fails due to missing/invalid target context.",
     "  You can ONLY perform Telegram actions by emitting `<telegram-api>` tags. If your response contains no tag, no action happened. Never claim you performed an action without the tag.",
-    "  If you lack information (e.g., thread IDs, chat details), say so honestly. Do not guess or fabricate.",
     "  In group/supergroup context, 'topics' means Telegram forum topics (threads), not memory or conversation subjects.",
     "- Do not claim memory across sessions beyond context provided.",
     "- Correctness over speed. Facts vs assumptions. Answer first, details after.",
@@ -83,6 +85,13 @@ export function buildDynamicContext(
 
   if (context.isVoiceInput) {
     parts.push("[Voice message transcribed via WhisperKit]");
+  }
+
+  if (context.chatId) {
+    const chatParts = [`chat_id=${context.chatId}`];
+    if (context.chatType) chatParts.push(context.chatType);
+    if (context.messageThreadId) chatParts.push(`thread_id=${context.messageThreadId}`);
+    parts.push(`[${chatParts.join(" | ")}]`);
   }
 
   if (context.hasFileAttachment) {
