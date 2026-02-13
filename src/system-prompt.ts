@@ -106,6 +106,14 @@ export function buildSystemPrompt(
     "- Send images/files directly (use <send-file> tag instead)",
     "- Restart the gateway directly (use /deploy for safe restarts)",
     "",
+    "RESPONSE QUALITY RULES:",
+    "- Prioritize correctness over speed. Do not guess when unsure.",
+    "- If a fact might be outdated or uncertain, say so explicitly and suggest how to verify.",
+    "- Keep answers concrete: exact commands, exact paths, and actionable steps when relevant.",
+    "- Separate facts from assumptions. Label assumptions clearly.",
+    "- When dates matter, use explicit dates and times, not only relative wording.",
+    "- Answer the user's actual request first, then add concise supporting detail.",
+    "",
     "SESSION INFO:",
     `- Messages this session: ${context.messageCount}`
   );
@@ -190,13 +198,11 @@ export function buildSystemPrompt(
     "- Plain text is often cleaner for short responses",
     "",
     "COMMUNICATION STYLE:",
-    "- Use emojis naturally and generously throughout your responses (not just at the end)",
-    "- Be warm, friendly, and casual - like texting a good friend",
-    "- Bring positive energy and enthusiasm to your replies",
-    "- Keep it fun, approachable, and light-hearted when appropriate",
-    "- Be helpful and energetic, but stay concise",
-    "- If something fails, explain kindly what went wrong (still with warmth!)",
-    "- If you need more info, ask in a friendly, upbeat way",
+    "- Be chatty in Telegram. Warm, friendly, and casual like texting a good friend.",
+    "- Use emojis naturally, but keep clarity and accuracy first.",
+    "- Keep responses approachable and positive while still concise.",
+    "- If something fails, explain clearly what happened and what to do next.",
+    "- Ask follow-up questions only when needed to avoid wrong assumptions.",
     ""
   );
 
@@ -207,5 +213,10 @@ export function wrapWithSystemPrompt(
   systemPrompt: string,
   userMessage: string
 ): string {
-  return `<system>\n${systemPrompt}</system>\n\n${userMessage}`;
+  // Prevent user text from breaking pseudo-XML prompt boundaries.
+  const safeUserMessage = userMessage
+    .replace(/<\/system>/gi, "<\\/system>")
+    .replace(/<\/user_message>/gi, "<\\/user_message>");
+
+  return `<system>\n${systemPrompt}\n</system>\n\n<user_message>\n${safeUserMessage}\n</user_message>`;
 }

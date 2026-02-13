@@ -98,6 +98,9 @@ function buildReplyOptions(
 export class StreamingResponseHandler {
   private ctx: Context;
   private typingInterval: NodeJS.Timeout | null = null;
+  private typingRunning: boolean = false;
+  private typingInFlight: boolean = false;
+  private lastTypingSentAt: number = 0;
   private currentMessageId: number | null = null;
   private accumulatedText: string = "";
   private lastSentText: string = "";
@@ -109,7 +112,8 @@ export class StreamingResponseHandler {
   private initialReplySent: boolean = false;
 
   // Constants
-  private readonly TYPING_INTERVAL_MS = 4000;
+  private readonly TYPING_REFRESH_MS = 4500;
+  private readonly TYPING_MIN_GAP_MS = 1000;
   private readonly EDIT_THROTTLE_MS = 2000;
   private readonly MAX_MESSAGE_LENGTH = 3500;
   private readonly MAX_EDITS = 25;
@@ -120,21 +124,53 @@ export class StreamingResponseHandler {
   }
 
   startTypingIndicator(): void {
-    // Send immediately, then start interval
-    this.ctx.replyWithChatAction("typing").catch(() => {});
-    this.typingInterval = setInterval(() => {
-      this.ctx.replyWithChatAction("typing").catch(() => {});
-    }, this.TYPING_INTERVAL_MS);
+    if (this.typingRunning) return;
+    this.typingRunning = true;
+
+    // Send immediately, then continue with precise non-overlapping refreshes.
+    void this.sendTypingPulse(true);
+    this.scheduleNextTypingPulse();
+  }
+
+  stopTypingIndicator(): void {
+    this.typingRunning = false;
+    if (this.typingInterval) {
+      clearTimeout(this.typingInterval);
+      this.typingInterval = null;
+    }
+  }
+
+  private scheduleNextTypingPulse(): void {
+    if (!this.typingRunning) return;
+
+    this.typingInterval = setTimeout(() => {
+      this.sendTypingPulse().finally(() => {
+        this.scheduleNextTypingPulse();
+      });
+    }, this.TYPING_REFRESH_MS);
+
     // Don't prevent process exit
     if (this.typingInterval && typeof this.typingInterval.unref === "function") {
       this.typingInterval.unref();
     }
   }
 
-  stopTypingIndicator(): void {
-    if (this.typingInterval) {
-      clearInterval(this.typingInterval);
-      this.typingInterval = null;
+  private async sendTypingPulse(force: boolean = false): Promise<void> {
+    if (!this.typingRunning || this.typingInFlight) return;
+
+    const now = Date.now();
+    if (!force && now - this.lastTypingSentAt < this.TYPING_MIN_GAP_MS) {
+      return;
+    }
+
+    this.typingInFlight = true;
+    try {
+      await this.ctx.replyWithChatAction("typing");
+      this.lastTypingSentAt = Date.now();
+    } catch {
+      // Ignore failures
+    } finally {
+      this.typingInFlight = false;
     }
   }
 
@@ -150,11 +186,6 @@ export class StreamingResponseHandler {
     if (this.accumulateOnly) {
       this.accumulatedText += chunk;
       return;
-    }
-
-    // Stop typing on first chunk (when no message exists yet)
-    if (this.currentMessageId === null) {
-      this.stopTypingIndicator();
     }
 
     let remaining = chunk;
@@ -482,17 +513,22 @@ export class StreamingResponseHandler {
           ...replyOptions,
           parse_mode: "MarkdownV2",
         } as any));
-        this.initialReplySent = true;
+        this.markInitialReplySent();
         return sent;
       }
       const sent = await this.withRetry(() => this.ctx.reply(safeText, replyOptions as any));
-      this.initialReplySent = true;
+      this.markInitialReplySent();
       return sent;
     } catch {
       const sent = await this.withRetry(() => this.ctx.reply(safeText, replyOptions as any));
-      this.initialReplySent = true;
+      this.markInitialReplySent();
       return sent;
     }
+  }
+
+  private markInitialReplySent(): void {
+    this.initialReplySent = true;
+    this.stopTypingIndicator();
   }
 
   /** Edit message with MarkdownV2 parse mode, fallback to plain text */
@@ -539,6 +575,11 @@ export class StreamingResponseHandler {
   /** Get accumulated text (for TTS or other post-processing) */
   getAccumulatedText(): string {
     return this.accumulatedText;
+  }
+
+  /** Get the Telegram message id currently used for streaming output. */
+  getCurrentMessageId(): number | null {
+    return this.currentMessageId;
   }
 }
 

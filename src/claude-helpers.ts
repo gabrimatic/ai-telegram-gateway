@@ -24,7 +24,9 @@ export async function forwardToClaude(ctx: Context, prompt: string): Promise<boo
         recentFailures: stats?.recentFailures ?? 0,
       };
       const memoryContext = loadMemoryContext();
-      const systemPrompt = buildSystemPrompt(context, memoryContext);
+      const systemPrompt = buildSystemPrompt(context, memoryContext, {
+        providerDisplayName: config.providerDisplayName,
+      });
       finalPrompt = wrapWithSystemPrompt(systemPrompt, prompt);
     }
 
@@ -62,7 +64,9 @@ export async function forwardToClaudeWithKeyboard(ctx: Context, prompt: string, 
         recentFailures: stats?.recentFailures ?? 0,
       };
       const memoryContext = loadMemoryContext();
-      const systemPrompt = buildSystemPrompt(context, memoryContext);
+      const systemPrompt = buildSystemPrompt(context, memoryContext, {
+        providerDisplayName: config.providerDisplayName,
+      });
       finalPrompt = wrapWithSystemPrompt(systemPrompt, prompt);
     }
 

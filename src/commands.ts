@@ -53,8 +53,7 @@ import {
   getScheduleById,
   formatSchedule,
   formatHistory,
-  loadSchedules,
-  saveSchedules,
+  createSchedule,
   reloadSchedules,
 } from "./task-scheduler";
 import { getTodayStats, getWeekStats, getMonthStats, formatAnalytics, getErrorRate } from "./analytics";
@@ -110,6 +109,19 @@ function sanitizeCodeBlock(text: string): string {
   return text.replace(/```/g, "\\`\\`\\`");
 }
 
+function buildPrivateQuickReplyKeyboard() {
+  return {
+    keyboard: [
+      [{ text: "/help" }, { text: "/model" }],
+      [{ text: "/schedule" }, { text: "/session" }],
+      [{ text: "/clear" }, { text: "/timer" }],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+    input_field_placeholder: "Ask me anything or tap a shortcut",
+  };
+}
+
 export function buildHelpKeyboard(isAdmin: boolean): InlineKeyboard {
   const keyboard = new InlineKeyboard()
     .text("\u23F1\uFE0F Timer", "timer_menu")
@@ -153,6 +165,7 @@ export function buildHelpText(options: {
   lines.push("\uD83D\uDCAC *CHAT & SESSION*");
   lines.push("/start /help /stats /id /version /uptime /ping");
   lines.push("/model /tts /clear");
+  lines.push("Interaction cues: `again`, `shorter`, `deeper`");
 
   if (options.isAdmin) {
     lines.push("/session /heartbeat");
@@ -207,15 +220,33 @@ export async function handleCommand(
     // ============ SYSTEM COMMANDS ============
 
     case "start": {
+      const startAction = args.trim().toLowerCase();
+      const deepLinkRoute: Record<string, string> = {
+        help: "help",
+        model: "model",
+        session: "session",
+        timer: "timer",
+        weather: "weather",
+        clear: "clear",
+      };
+      if (startAction && deepLinkRoute[startAction]) {
+        return await handleCommand(ctx, deepLinkRoute[startAction], "");
+      }
+
       const safeProviderName = escapeMarkdown(providerName);
       const keyboard = buildHelpKeyboard(isAdmin)
         .row()
         .text("\u2753 Help", "help_show");
 
       await ctx.reply(
-        `*Hey there! \u{1F44B}\u{2728}*\n\nI'm ${safeProviderName}, running via the AI Telegram Gateway! Here's what I can do:\n\n\u{1F4AC} Chat naturally with me\n\u{1F4CE} Send files (photos, docs, audio)\n\u{1F3A4} Send voice messages (transcribed locally)\n\u{2753} Use /help for all the cool commands\n\nQuick actions:`,
+        `*Hey there! \u{1F44B}\u{2728}*\n\nI'm ${safeProviderName}, running via the AI Telegram Gateway! Here's what I can do:\n\n\u{1F4AC} Chat naturally with me\n\u{1F4CE} Send files (photos, docs, audio)\n\u{1F3A4} Send voice messages (transcribed locally)\n\u{1F501} Follow up with: \`again\`, \`shorter\`, \`deeper\`\n\u{2753} Use /help for all the cool commands\n\nQuick actions:`,
         { parse_mode: "Markdown", reply_markup: keyboard }
       );
+      if (ctx.chat?.type === "private") {
+        await ctx.reply("Quick keyboard enabled for this chat.", {
+          reply_markup: buildPrivateQuickReplyKeyboard(),
+        });
+      }
       return true;
     }
 
@@ -450,25 +481,17 @@ export async function handleCommand(
         return true;
       }
       const triggerAt = new Date(Date.now() + parsedMs).toISOString();
-      const store = loadSchedules();
-      const id = store.nextId++;
-      store.schedules.push({
-        id,
+      const schedule = createSchedule({
         type: "once",
         jobType: "shell",
         task: `echo "Timer done"`,
         output: "telegram",
         name: label,
-        status: "active",
-        createdAt: new Date().toISOString(),
         scheduledTime: triggerAt,
-        nextRun: triggerAt,
         userId: userId!,
-        history: [],
       });
-      saveSchedules(store);
       reloadSchedules();
-      await ctx.reply(`\u{23F1}\u{FE0F} Timer set: *${label}* in ${timeStr} (schedule #${id})`, { parse_mode: "Markdown" });
+      await ctx.reply(`\u{23F1}\u{FE0F} Timer set: *${label}* in ${timeStr} (schedule #${schedule.id})`, { parse_mode: "Markdown" });
       return true;
     }
 

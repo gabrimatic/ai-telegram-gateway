@@ -13,10 +13,17 @@ import { loadMemoryContext } from "./memory";
 import { getConfiguredProviderName, getProviderDisplayName, getProviderProcessConfig } from "./provider";
 import { ICONS } from "./constants";
 import { formatDuration, formatUptime, safeExec } from "./utils";
-import { loadSchedules, saveSchedules, reloadSchedules } from "./task-scheduler";
+import { createSchedule, reloadSchedules } from "./task-scheduler";
 import { env } from "./env";
 import { loadAllowlist, isAdminUser, isUserAllowed } from "./storage";
 import { buildHelpKeyboard, buildHelpText } from "./commands";
+import { StreamingResponseHandler, sendErrorResponse } from "./response-handler";
+import {
+  getActionContext,
+  createActionContext,
+  buildActionPrompt,
+  buildActionKeyboard,
+} from "./interactive-actions";
 
 async function isAllowedCallbackUser(ctx: CallbackQueryContext<Context>): Promise<boolean> {
   const userId = ctx.from?.id?.toString();
@@ -33,6 +40,21 @@ async function isAdminCallbackUser(ctx: CallbackQueryContext<Context>): Promise<
   return isAdminUser(userId, allowlist);
 }
 
+function withSystemPrompt(prompt: string): string {
+  const config = getConfig();
+  if (!config.enableSystemPrompt) return prompt;
+  const stats = getAIStats();
+  const context: SessionContext = {
+    messageCount: stats?.messageCount ?? 0,
+    recentFailures: stats?.recentFailures ?? 0,
+  };
+  const memoryContext = loadMemoryContext();
+  const systemPrompt = buildSystemPrompt(context, memoryContext, {
+    providerDisplayName: config.providerDisplayName,
+  });
+  return wrapWithSystemPrompt(systemPrompt, prompt);
+}
+
 export async function handleTimerCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
   try {
     if (!(await isAllowedCallbackUser(ctx))) {
@@ -47,26 +69,18 @@ export async function handleTimerCallback(ctx: CallbackQueryContext<Context>): P
 
     const triggerAt = new Date(Date.now() + seconds * 1000).toISOString();
     const label = `Timer ${formatDuration(seconds)}`;
-    const store = loadSchedules();
-    const id = store.nextId++;
-    store.schedules.push({
-      id,
+    const schedule = createSchedule({
       type: "once",
       jobType: "shell",
       task: `echo "${label} done!"`,
       output: "telegram",
       name: label,
-      status: "active",
-      createdAt: new Date().toISOString(),
       scheduledTime: triggerAt,
-      nextRun: triggerAt,
       userId,
-      history: [],
     });
-    saveSchedules(store);
     reloadSchedules();
 
-    await ctx.editMessageText(`\u23F1\uFE0F Timer: *${formatDuration(seconds)}* (schedule #${id})`, { parse_mode: "Markdown" });
+    await ctx.editMessageText(`\u23F1\uFE0F Timer: *${formatDuration(seconds)}* (schedule #${schedule.id})`, { parse_mode: "Markdown" });
   } catch (err) {
     error("callbacks", "timer_callback_failed", {
       error: err instanceof Error ? err.message : String(err),
@@ -96,7 +110,9 @@ export async function handleWeatherCallback(ctx: CallbackQueryContext<Context>):
         recentFailures: stats?.recentFailures ?? 0,
       };
       const memoryContext = loadMemoryContext();
-      const systemPrompt = buildSystemPrompt(context, memoryContext);
+      const systemPrompt = buildSystemPrompt(context, memoryContext, {
+        providerDisplayName: config.providerDisplayName,
+      });
       finalPrompt = wrapWithSystemPrompt(systemPrompt, prompt);
     }
 
@@ -354,4 +370,73 @@ export async function handleRebootCancelCallback(ctx: CallbackQueryContext<Conte
     });
   }
   await ctx.answerCallbackQuery();
+}
+
+export async function handleAIActionCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
+  try {
+    if (!(await isAllowedCallbackUser(ctx))) {
+      await ctx.answerCallbackQuery("Not authorized");
+      return;
+    }
+
+    const match = ctx.callbackQuery.data.match(/^ai_(regen|short|deep)_([a-z0-9]+)$/);
+    if (!match) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const action = match[1] as "regen" | "short" | "deep";
+    const token = match[2];
+    const userId = ctx.from?.id?.toString();
+    if (!userId) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const actionContext = getActionContext(token);
+    if (!actionContext) {
+      await ctx.answerCallbackQuery("This action expired. Send a new message.");
+      return;
+    }
+    if (actionContext.userId !== userId) {
+      await ctx.answerCallbackQuery("This action belongs to another user.");
+      return;
+    }
+
+    await ctx.answerCallbackQuery("Working...");
+
+    const prompt = buildActionPrompt(action, actionContext.prompt);
+    const finalPrompt = withSystemPrompt(prompt);
+    const streamHandler = new StreamingResponseHandler(ctx);
+    streamHandler.startTypingIndicator();
+    const onChunk = async (chunk: string): Promise<void> => {
+      await streamHandler.handleChunk(chunk);
+    };
+
+    const result = await runAI(finalPrompt, onChunk);
+    incrementMessages();
+
+    if (!result.success) {
+      streamHandler.cleanup();
+      recordFailure("unknown");
+      await sendErrorResponse(ctx, result.error || "Couldn't generate a response.", userId);
+      return;
+    }
+
+    recordSuccess();
+    await streamHandler.finalize();
+    const messageId = streamHandler.getCurrentMessageId();
+    if (messageId && ctx.chat) {
+      const nextToken = createActionContext(userId, actionContext.prompt);
+      await ctx.api.editMessageReplyMarkup(ctx.chat.id, messageId, {
+        reply_markup: buildActionKeyboard(nextToken),
+      });
+    }
+  } catch (err) {
+    incrementErrors();
+    error("callbacks", "ai_action_callback_failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    await ctx.answerCallbackQuery("Something went wrong");
+  }
 }

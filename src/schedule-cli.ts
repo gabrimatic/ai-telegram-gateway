@@ -6,16 +6,20 @@
  *   node dist/schedule-cli.js create --name "..." --type cron --cron "..." --job prompt --cmd "..." --output telegram --user <id>
  *   node dist/schedule-cli.js list [--active] [--user <id>]
  *   node dist/schedule-cli.js cancel <id>
- *   node dist/schedule-cli.js update <id> [--name "..."] [--cron "..."] [--cmd "..."] [--output ...] [--job ...]
+ *   node dist/schedule-cli.js update <id> [--name "..."] [--cron "..."] [--time "YYYY-MM-DD HH:MM"] [--cmd "..."] [--output ...] [--job ...]
  *   node dist/schedule-cli.js history <id> [--limit 10]
  */
 
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
-  writeFileSync,
   renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
 } from "fs";
 import { dirname, join } from "path";
 import { homedir } from "os";
@@ -56,8 +60,12 @@ interface ScheduleStore {
 
 const SCHEDULES_DIR = join(homedir(), ".claude", "gateway");
 const SCHEDULES_PATH = join(SCHEDULES_DIR, "schedules.json");
+const SCHEDULES_LOCK_PATH = join(SCHEDULES_DIR, "schedules.lock");
 const PID_FILE = process.env.TG_PID_FILE || join(__dirname, "..", "gateway.pid");
 const TIMEZONE = "Europe/Berlin";
+const STORE_LOCK_TIMEOUT_MS = 5_000;
+const STORE_LOCK_RETRY_MS = 25;
+const STORE_LOCK_STALE_MS = 30_000;
 
 // --- Helpers ---
 
@@ -65,9 +73,15 @@ function output(data: Record<string, unknown>): void {
   process.stdout.write(JSON.stringify(data) + "\n");
 }
 
+class CliError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CliError";
+  }
+}
+
 function fail(message: string): never {
-  output({ ok: false, error: message });
-  process.exit(1);
+  throw new CliError(message);
 }
 
 function ensureDir(): void {
@@ -76,23 +90,137 @@ function ensureDir(): void {
   }
 }
 
-function loadStore(): ScheduleStore {
+function sleepMs(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function withStoreLock<T>(operation: () => T): T {
+  ensureDir();
+  const startedAt = Date.now();
+
+  while (true) {
+    try {
+      const fd = openSync(SCHEDULES_LOCK_PATH, "wx");
+      try {
+        return operation();
+      } finally {
+        closeSync(fd);
+        try {
+          unlinkSync(SCHEDULES_LOCK_PATH);
+        } catch {
+          // Ignore lock cleanup race.
+        }
+      }
+    } catch (err) {
+      const fsErr = err as NodeJS.ErrnoException;
+      if (fsErr.code !== "EEXIST") {
+        throw err;
+      }
+
+      try {
+        const lockStat = statSync(SCHEDULES_LOCK_PATH);
+        if (Date.now() - lockStat.mtimeMs > STORE_LOCK_STALE_MS) {
+          unlinkSync(SCHEDULES_LOCK_PATH);
+          continue;
+        }
+      } catch {
+        // Lock disappeared between checks.
+      }
+
+      if (Date.now() - startedAt >= STORE_LOCK_TIMEOUT_MS) {
+        fail(`Timed out acquiring schedule store lock after ${STORE_LOCK_TIMEOUT_MS}ms.`);
+      }
+
+      sleepMs(STORE_LOCK_RETRY_MS);
+    }
+  }
+}
+
+function normalizeSchedule(raw: unknown): Schedule | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Partial<Schedule>;
+  const id = Number(value.id);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  if (value.type !== "once" && value.type !== "cron") return null;
+  if (typeof value.task !== "string" || value.task.trim().length === 0) return null;
+  if (typeof value.userId !== "string" || value.userId.trim().length === 0) return null;
+
+  const schedule: Schedule = {
+    id,
+    type: value.type,
+    jobType: value.jobType === "shell" || value.jobType === "script" || value.jobType === "prompt"
+      ? value.jobType
+      : "prompt",
+    task: value.task,
+    output: typeof value.output === "string" && value.output.trim().length > 0 ? value.output : "telegram",
+    name: typeof value.name === "string" ? value.name : undefined,
+    status: value.status === "active" || value.status === "completed" || value.status === "cancelled" || value.status === "failed"
+      ? value.status
+      : "active",
+    createdAt: typeof value.createdAt === "string" ? value.createdAt : new Date().toISOString(),
+    lastRun: typeof value.lastRun === "string" ? value.lastRun : undefined,
+    nextRun: typeof value.nextRun === "string" ? value.nextRun : undefined,
+    userId: value.userId,
+    history: Array.isArray(value.history)
+      ? value.history.filter((entry): entry is ScheduleHistoryEntry => (
+        !!entry
+        && typeof entry === "object"
+        && typeof (entry as Partial<ScheduleHistoryEntry>).timestamp === "string"
+        && typeof (entry as Partial<ScheduleHistoryEntry>).result === "string"
+        && typeof (entry as Partial<ScheduleHistoryEntry>).duration === "number"
+        && typeof (entry as Partial<ScheduleHistoryEntry>).success === "boolean"
+      ))
+      : [],
+  };
+
+  if (schedule.type === "cron" && typeof value.cronExpression === "string") {
+    schedule.cronExpression = value.cronExpression;
+  }
+  if (schedule.type === "once" && typeof value.scheduledTime === "string") {
+    schedule.scheduledTime = value.scheduledTime;
+  }
+
+  return schedule;
+}
+
+function loadStoreUnsafe(): ScheduleStore {
   ensureDir();
   if (!existsSync(SCHEDULES_PATH)) {
     return { schedules: [], nextId: 1 };
   }
   try {
-    return JSON.parse(readFileSync(SCHEDULES_PATH, "utf-8")) as ScheduleStore;
+    const parsed = JSON.parse(readFileSync(SCHEDULES_PATH, "utf-8")) as Partial<ScheduleStore>;
+    const schedules = Array.isArray(parsed.schedules)
+      ? parsed.schedules.map((schedule) => normalizeSchedule(schedule)).filter((schedule): schedule is Schedule => schedule !== null)
+      : [];
+    const maxId = schedules.reduce((currentMax, schedule) => Math.max(currentMax, schedule.id), 0);
+    const nextId = Number.isInteger(parsed.nextId) && (parsed.nextId as number) > maxId
+      ? parsed.nextId as number
+      : maxId + 1;
+    return { schedules, nextId };
   } catch {
     return { schedules: [], nextId: 1 };
   }
 }
 
-function saveStore(store: ScheduleStore): void {
+function saveStoreUnsafe(store: ScheduleStore): void {
   ensureDir();
-  const tempPath = join(dirname(SCHEDULES_PATH), `.${Date.now()}.tmp`);
+  const tempPath = join(dirname(SCHEDULES_PATH), `.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
   writeFileSync(tempPath, JSON.stringify(store, null, 2));
   renameSync(tempPath, SCHEDULES_PATH);
+}
+
+function mutateStore<T>(mutator: (store: ScheduleStore) => T): T {
+  return withStoreLock(() => {
+    const store = loadStoreUnsafe();
+    const result = mutator(store);
+    saveStoreUnsafe(store);
+    return result;
+  });
+}
+
+function loadStore(): ScheduleStore {
+  return loadStoreUnsafe();
 }
 
 function signalGateway(): void {
@@ -144,17 +272,67 @@ function parseBerlinTime(timeStr: string): string {
     fail(`Invalid time format: "${timeStr}". Expected "YYYY-MM-DD HH:MM".`);
   }
 
-  const [, year, month, day, hours, minutes] = match;
-  const pad = (n: number) => n.toString().padStart(2, "0");
-  const dateStr = `${year}-${pad(parseInt(month, 10))}-${pad(parseInt(day, 10))}T${pad(parseInt(hours, 10))}:${pad(parseInt(minutes, 10))}:00`;
+  const year = parseInt(match[1], 10);
+  const month = parseInt(match[2], 10);
+  const day = parseInt(match[3], 10);
+  const hour = parseInt(match[4], 10);
+  const minute = parseInt(match[5], 10);
 
-  // Find UTC offset for Berlin at that time
-  const tempDate = new Date(dateStr + "Z");
-  const berlinStr = tempDate.toLocaleString("en-US", { timeZone: TIMEZONE });
-  const berlinDate = new Date(berlinStr);
-  const offsetMs = tempDate.getTime() - berlinDate.getTime();
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59) {
+    fail(`Invalid time value: "${timeStr}".`);
+  }
 
-  const result = new Date(tempDate.getTime() + offsetMs);
+  const formatter = new Intl.DateTimeFormat("en-GB", {
+    timeZone: TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+  const parseParts = (date: Date): Record<string, string> => {
+    const parts = formatter.formatToParts(date);
+    const map: Record<string, string> = {};
+    for (const part of parts) {
+      if (part.type !== "literal") {
+        map[part.type] = part.value;
+      }
+    }
+    return map;
+  };
+  const getOffsetMs = (date: Date): number => {
+    const parts = parseParts(date);
+    const asUtc = Date.UTC(
+      parseInt(parts.year, 10),
+      parseInt(parts.month, 10) - 1,
+      parseInt(parts.day, 10),
+      parseInt(parts.hour, 10),
+      parseInt(parts.minute, 10),
+      parseInt(parts.second, 10),
+    );
+    return asUtc - date.getTime();
+  };
+
+  // Iterative conversion: local Berlin wall-time -> UTC instant.
+  const localAsUtc = Date.UTC(year, month - 1, day, hour, minute, 0);
+  let utcMillis = localAsUtc - getOffsetMs(new Date(localAsUtc));
+  utcMillis = localAsUtc - getOffsetMs(new Date(utcMillis));
+  const result = new Date(utcMillis);
+  const resultParts = parseParts(result);
+
+  // Reject non-existent local times (DST spring-forward gaps).
+  if (
+    parseInt(resultParts.year, 10) !== year
+    || parseInt(resultParts.month, 10) !== month
+    || parseInt(resultParts.day, 10) !== day
+    || parseInt(resultParts.hour, 10) !== hour
+    || parseInt(resultParts.minute, 10) !== minute
+  ) {
+    fail(`Invalid local Berlin time: "${timeStr}" (possibly during DST transition).`);
+  }
+
   return result.toISOString();
 }
 
@@ -183,46 +361,50 @@ function cmdCreate(flags: Record<string, string>): void {
 
   const outputTarget = flags["output"] || "telegram";
   const name = flags["name"];
-
-  const store = loadStore();
-  const id = store.nextId++;
-
-  const schedule: Schedule = {
-    id,
-    type,
-    jobType,
-    task: cmd,
-    output: outputTarget,
-    status: "active",
-    createdAt: new Date().toISOString(),
-    userId: user,
-    history: [],
-  };
-
-  if (name) {
-    schedule.name = name;
-  }
-
+  let cronExpr: string | undefined;
+  let scheduledTime: string | undefined;
   if (type === "cron") {
-    const cronExpr = flags["cron"];
+    cronExpr = flags["cron"];
     if (!cronExpr) {
       fail("--cron is required for type=cron.");
     }
     if (!validateCron(cronExpr)) {
       fail(`Invalid cron expression: "${cronExpr}".`);
     }
-    schedule.cronExpression = cronExpr;
   } else {
     const time = flags["time"];
     if (!time) {
       fail("--time is required for type=once (format: \"YYYY-MM-DD HH:MM\").");
     }
-    schedule.scheduledTime = parseBerlinTime(time);
-    schedule.nextRun = schedule.scheduledTime;
+    scheduledTime = parseBerlinTime(time);
   }
 
-  store.schedules.push(schedule);
-  saveStore(store);
+  const schedule = mutateStore((store) => {
+    const created: Schedule = {
+      id: store.nextId++,
+      type,
+      jobType,
+      task: cmd,
+      output: outputTarget,
+      status: "active",
+      createdAt: new Date().toISOString(),
+      userId: user,
+      history: [],
+    };
+    if (name) {
+      created.name = name;
+    }
+    if (type === "cron") {
+      created.cronExpression = cronExpr;
+    } else {
+      created.scheduledTime = scheduledTime;
+      created.nextRun = scheduledTime;
+    }
+
+    store.schedules.push(created);
+    return created;
+  });
+
   signalGateway();
 
   output({ ok: true, schedule });
@@ -261,19 +443,22 @@ function cmdCancel(positional: string[]): void {
     fail(`Invalid schedule ID: "${idStr}".`);
   }
 
-  const store = loadStore();
-  const schedule = store.schedules.find((s) => s.id === id);
+  const schedule = mutateStore((store) => {
+    const found = store.schedules.find((s) => s.id === id);
 
-  if (!schedule) {
-    fail(`Schedule #${id} not found.`);
-  }
+    if (!found) {
+      fail(`Schedule #${id} not found.`);
+    }
 
-  if (schedule.status !== "active") {
-    fail(`Schedule #${id} is already ${schedule.status}.`);
-  }
+    if (found.status !== "active") {
+      fail(`Schedule #${id} is already ${found.status}.`);
+    }
 
-  schedule.status = "cancelled";
-  saveStore(store);
+    found.status = "cancelled";
+    found.nextRun = undefined;
+    return found;
+  });
+
   signalGateway();
 
   output({ ok: true, schedule });
@@ -282,7 +467,7 @@ function cmdCancel(positional: string[]): void {
 function cmdUpdate(positional: string[], flags: Record<string, string>): void {
   const idStr = positional[0];
   if (!idStr) {
-    fail("Schedule ID is required. Usage: update <id> [--name ...] [--cron ...] [--cmd ...] [--output ...] [--job ...]");
+    fail("Schedule ID is required. Usage: update <id> [--name ...] [--cron ...] [--time \"YYYY-MM-DD HH:MM\"] [--cmd ...] [--output ...] [--job ...]");
   }
 
   const id = parseInt(idStr, 10);
@@ -290,41 +475,60 @@ function cmdUpdate(positional: string[], flags: Record<string, string>): void {
     fail(`Invalid schedule ID: "${idStr}".`);
   }
 
-  const store = loadStore();
-  const schedule = store.schedules.find((s) => s.id === id);
-
-  if (!schedule) {
-    fail(`Schedule #${id} not found.`);
-  }
-
-  if (flags["name"] !== undefined) {
-    schedule.name = flags["name"];
-  }
-
-  if (flags["cmd"] !== undefined) {
-    schedule.task = flags["cmd"];
-  }
-
-  if (flags["output"] !== undefined) {
-    schedule.output = flags["output"];
-  }
-
-  if (flags["job"] !== undefined) {
-    const jobType = flags["job"] as "prompt" | "shell" | "script";
-    if (!["prompt", "shell", "script"].includes(jobType)) {
-      fail("--job must be prompt, shell, or script.");
+  const schedule = mutateStore((store) => {
+    const found = store.schedules.find((s) => s.id === id);
+    if (!found) {
+      fail(`Schedule #${id} not found.`);
     }
-    schedule.jobType = jobType;
-  }
 
-  if (flags["cron"] !== undefined) {
-    if (!validateCron(flags["cron"])) {
-      fail(`Invalid cron expression: "${flags["cron"]}".`);
+    if (flags["name"] !== undefined) {
+      found.name = flags["name"];
     }
-    schedule.cronExpression = flags["cron"];
-  }
 
-  saveStore(store);
+    if (flags["cmd"] !== undefined) {
+      found.task = flags["cmd"];
+    }
+
+    if (flags["output"] !== undefined) {
+      found.output = flags["output"];
+    }
+
+    if (flags["job"] !== undefined) {
+      const jobType = flags["job"] as "prompt" | "shell" | "script";
+      if (!["prompt", "shell", "script"].includes(jobType)) {
+        fail("--job must be prompt, shell, or script.");
+      }
+      found.jobType = jobType;
+    }
+
+    if (flags["cron"] !== undefined) {
+      if (found.type !== "cron") {
+        fail("--cron can only be used with type=cron schedules.");
+      }
+      if (!validateCron(flags["cron"])) {
+        fail(`Invalid cron expression: "${flags["cron"]}".`);
+      }
+      found.cronExpression = flags["cron"];
+    }
+
+    if (flags["time"] !== undefined) {
+      if (found.type !== "once") {
+        fail("--time can only be used with type=once schedules.");
+      }
+      const parsed = parseBerlinTime(flags["time"]);
+      found.scheduledTime = parsed;
+      found.nextRun = parsed;
+    }
+
+    if (found.type === "cron") {
+      found.scheduledTime = undefined;
+    } else if (found.type === "once") {
+      found.cronExpression = undefined;
+    }
+
+    return found;
+  });
+
   signalGateway();
 
   output({ ok: true, schedule });
@@ -357,32 +561,40 @@ function cmdHistory(positional: string[], flags: Record<string, string>): void {
 // --- Main ---
 
 function main(): void {
-  const argv = process.argv.slice(2);
+  try {
+    const argv = process.argv.slice(2);
 
-  if (argv.length === 0) {
-    fail("Usage: schedule-cli <create|list|cancel|update|history> [options]");
-  }
+    if (argv.length === 0) {
+      fail("Usage: schedule-cli <create|list|cancel|update|history> [options]");
+    }
 
-  const { command, positional, flags } = parseArgs(argv);
+    const { command, positional, flags } = parseArgs(argv);
 
-  switch (command) {
-    case "create":
-      cmdCreate(flags);
-      break;
-    case "list":
-      cmdList(flags);
-      break;
-    case "cancel":
-      cmdCancel(positional);
-      break;
-    case "update":
-      cmdUpdate(positional, flags);
-      break;
-    case "history":
-      cmdHistory(positional, flags);
-      break;
-    default:
-      fail(`Unknown command: "${command}". Valid commands: create, list, cancel, update, history.`);
+    switch (command) {
+      case "create":
+        cmdCreate(flags);
+        break;
+      case "list":
+        cmdList(flags);
+        break;
+      case "cancel":
+        cmdCancel(positional);
+        break;
+      case "update":
+        cmdUpdate(positional, flags);
+        break;
+      case "history":
+        cmdHistory(positional, flags);
+        break;
+      default:
+        fail(`Unknown command: "${command}". Valid commands: create, list, cancel, update, history.`);
+    }
+  } catch (err) {
+    if (err instanceof CliError) {
+      output({ ok: false, error: err.message });
+      process.exit(1);
+    }
+    throw err;
   }
 }
 

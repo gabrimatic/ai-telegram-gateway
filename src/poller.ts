@@ -18,6 +18,12 @@ import { sendResponse, sendErrorResponse, sendTypingIndicator, StreamingResponse
 import { isTTSOutputEnabled } from "./tts";
 import { isDeployPending } from "./deployer";
 import {
+  createActionContext,
+  buildActionKeyboard,
+  buildActionPrompt,
+  getLatestActionContextForUser,
+} from "./interactive-actions";
+import {
   downloadTelegramFile,
   formatFileMetadata,
   FileMetadata,
@@ -105,7 +111,29 @@ import {
   handleSessionCallback,
   handleRebootConfirmCallback,
   handleRebootCancelCallback,
+  handleAIActionCallback,
 } from "./callbacks";
+
+async function attachActionKeyboard(ctx: Context, messageId: number, token: string): Promise<void> {
+  if (!ctx.chat) return;
+  try {
+    await ctx.api.editMessageReplyMarkup(ctx.chat.id, messageId, {
+      reply_markup: buildActionKeyboard(token),
+    });
+  } catch {
+    // Ignore markup attachment failures (message may be deleted/edited elsewhere)
+  }
+}
+
+function shouldAttachActionKeyboard(prompt: string, response: string): boolean {
+  const cueLikePrompt = /^(again|regenerate|shorter|concise|deeper|detail)$/i.test(prompt.trim());
+  if (cueLikePrompt) return true;
+  const text = response.trim();
+  if (text.length >= 90) return true;
+
+  const looksStructured = /\n|•|- /.test(text) || (text.match(/[.!?]/g)?.length ?? 0) >= 2;
+  return text.length >= 50 && looksStructured;
+}
 
 /**
  * Handle file messages (documents, photos, videos, etc.)
@@ -429,6 +457,29 @@ async function handleMessage(ctx: Context): Promise<void> {
   }
 
   // User is allowed, process with AI
+  const interactionCue = messageText.trim().toLowerCase();
+  const cueToAction: Record<string, "regen" | "short" | "deep"> = {
+    again: "regen",
+    regenerate: "regen",
+    shorter: "short",
+    concise: "short",
+    deeper: "deep",
+    detail: "deep",
+  };
+  const cueAction = cueToAction[interactionCue];
+  if (cueAction) {
+    const latestContext = getLatestActionContextForUser(userId);
+    if (latestContext) {
+      const interactionPrompt = buildActionPrompt(cueAction, latestContext.prompt);
+      await processTextWithClaude(ctx, userId, interactionPrompt, {
+        requestId,
+        actionBasePrompt: latestContext.prompt,
+      });
+      return;
+    }
+  }
+
+  // User is allowed, process with AI
   const isQueued = aiProcessingCount > 0;
   debug("poller", "processing_message", {
     userId,
@@ -501,6 +552,11 @@ async function handleMessage(ctx: Context): Promise<void> {
       recordSuccess();
       trackOutboundMessage(responseTimeMs, result.response.length);
       await streamHandler.finalize();
+      const token = createActionContext(userId, messageText);
+      const messageId = streamHandler.getCurrentMessageId();
+      if (messageId && shouldAttachActionKeyboard(messageText, result.response)) {
+        await attachActionKeyboard(ctx, messageId, token);
+      }
       debug("poller", "message_processed", {
         userId,
         responseLength: result.response.length,
@@ -548,7 +604,12 @@ async function processTextWithClaude(
   ctx: Context,
   userId: string,
   text: string,
-  options?: { isVoiceInput?: boolean; hasFileAttachment?: boolean; requestId?: string }
+  options?: {
+    isVoiceInput?: boolean;
+    hasFileAttachment?: boolean;
+    requestId?: string;
+    actionBasePrompt?: string;
+  }
 ): Promise<void> {
   const requestId = options?.requestId || generateRequestId();
   const isQueued = aiProcessingCount > 0;
@@ -620,11 +681,13 @@ async function processTextWithClaude(
     if (result.success) {
       recordSuccess();
       trackOutboundMessage(responseTimeMs, result.response.length);
+      const actionContextPrompt = options?.actionBasePrompt ?? text;
       // For voice input, use sendResponse with TTS; for text, finalize handles it
       if (options?.isVoiceInput) {
         streamHandler.cleanup();
         const replyText = streamHandler.getAccumulatedText().trim() || result.response.trim();
         if (replyText) {
+          createActionContext(userId, actionContextPrompt);
           await sendResponse(ctx, {
             text: replyText,
             userId,
@@ -633,6 +696,11 @@ async function processTextWithClaude(
         }
       } else {
         await streamHandler.finalize();
+        const token = createActionContext(userId, actionContextPrompt);
+        const messageId = streamHandler.getCurrentMessageId();
+        if (messageId && shouldAttachActionKeyboard(text, result.response)) {
+          await attachActionKeyboard(ctx, messageId, token);
+        }
       }
       debug("poller", "message_processed", {
         userId,
@@ -840,6 +908,7 @@ export async function createBot(
   bot.callbackQuery(/^session_(status|kill|new)$/, handleSessionCallback);
   bot.callbackQuery("reboot_confirm", handleRebootConfirmCallback);
   bot.callbackQuery("reboot_cancel", handleRebootCancelCallback);
+  bot.callbackQuery(/^ai_(regen|short|deep)_[a-z0-9]+$/, handleAIActionCallback);
 
   // Catch-all handler to prevent loading spinners on unknown callbacks
   bot.on("callback_query:data", async (ctx) => {

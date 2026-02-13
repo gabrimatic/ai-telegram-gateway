@@ -7,12 +7,16 @@
 import { spawn, exec, execFile } from "child_process";
 import * as readline from "readline";
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
-  writeFileSync,
-  renameSync,
   appendFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
 } from "fs";
 import { dirname, join, extname } from "path";
 import { homedir } from "os";
@@ -56,8 +60,13 @@ export interface ScheduleStore {
 
 const SCHEDULES_DIR = join(homedir(), ".claude", "gateway");
 const SCHEDULES_PATH = join(SCHEDULES_DIR, "schedules.json");
+const SCHEDULES_LOCK_PATH = join(SCHEDULES_DIR, "schedules.lock");
 const MAX_HISTORY_PER_SCHEDULE = 50;
 const TASK_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes per task execution
+const MAX_SET_TIMEOUT_MS = 2_147_483_647; // Node.js max setTimeout delay (~24.8 days)
+const STORE_LOCK_TIMEOUT_MS = 5_000;
+const STORE_LOCK_RETRY_MS = 25;
+const STORE_LOCK_STALE_MS = 30_000;
 const TIMEZONE = "Europe/Berlin";
 
 // --- State ---
@@ -66,6 +75,8 @@ const TIMEZONE = "Europe/Berlin";
 const activeCronJobs: Map<number, cron.ScheduledTask> = new Map();
 // Active one-time timers keyed by schedule ID
 const activeTimers: Map<number, NodeJS.Timeout> = new Map();
+// Running tasks keyed by schedule ID (prevents overlap on long cron jobs/reloads)
+const runningSchedules: Set<number> = new Set();
 // Notification callback - set by the bot integration
 let notifyUser: ((userId: string, message: string) => Promise<void>) | null = null;
 
@@ -78,26 +89,219 @@ function ensureStorageDir(): void {
 }
 
 function atomicWriteSync(filePath: string, content: string): void {
-  const tempPath = join(dirname(filePath), `.${Date.now()}.tmp`);
+  const tempPath = join(dirname(filePath), `.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
   writeFileSync(tempPath, content);
   renameSync(tempPath, filePath);
 }
 
-export function loadSchedules(): ScheduleStore {
+function sleepMs(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function withStoreLock<T>(operation: () => T): T {
+  ensureStorageDir();
+  const startedAt = Date.now();
+  let staleLockWarned = false;
+
+  while (true) {
+    try {
+      const fd = openSync(SCHEDULES_LOCK_PATH, "wx");
+      try {
+        return operation();
+      } finally {
+        closeSync(fd);
+        try {
+          unlinkSync(SCHEDULES_LOCK_PATH);
+        } catch {
+          // Ignore cleanup errors.
+        }
+      }
+    } catch (err) {
+      const fsErr = err as NodeJS.ErrnoException;
+      if (fsErr.code !== "EEXIST") {
+        throw err;
+      }
+
+      try {
+        const lockStat = statSync(SCHEDULES_LOCK_PATH);
+        if (Date.now() - lockStat.mtimeMs > STORE_LOCK_STALE_MS) {
+          unlinkSync(SCHEDULES_LOCK_PATH);
+          if (!staleLockWarned) {
+            warn("task-scheduler", "stale_store_lock_removed", {
+              ageMs: Date.now() - lockStat.mtimeMs,
+            });
+            staleLockWarned = true;
+          }
+          continue;
+        }
+      } catch {
+        // Lock disappeared between checks, retry.
+      }
+
+      if (Date.now() - startedAt >= STORE_LOCK_TIMEOUT_MS) {
+        throw new Error(`Timed out acquiring schedule store lock after ${STORE_LOCK_TIMEOUT_MS}ms`);
+      }
+
+      sleepMs(STORE_LOCK_RETRY_MS);
+    }
+  }
+}
+
+function normalizeSchedule(raw: unknown): Schedule | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Partial<Schedule>;
+  const id = Number(value.id);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  if (value.type !== "once" && value.type !== "cron") return null;
+  if (typeof value.task !== "string" || value.task.trim().length === 0) return null;
+  if (typeof value.userId !== "string" || value.userId.trim().length === 0) return null;
+
+  const jobType = value.jobType === "shell" || value.jobType === "script" || value.jobType === "prompt"
+    ? value.jobType
+    : "prompt";
+  const status = value.status === "active" || value.status === "completed" || value.status === "cancelled" || value.status === "failed"
+    ? value.status
+    : "active";
+  const output = typeof value.output === "string" && value.output.trim().length > 0
+    ? value.output
+    : "telegram";
+  const createdAt = typeof value.createdAt === "string" ? value.createdAt : new Date().toISOString();
+  const history = Array.isArray(value.history)
+    ? value.history.filter((entry): entry is ScheduleHistoryEntry => {
+        if (!entry || typeof entry !== "object") return false;
+        const candidate = entry as Partial<ScheduleHistoryEntry>;
+        return (
+          typeof candidate.timestamp === "string"
+          && typeof candidate.result === "string"
+          && typeof candidate.duration === "number"
+          && typeof candidate.success === "boolean"
+        );
+      })
+    : [];
+
+  const schedule: Schedule = {
+    id,
+    type: value.type,
+    jobType,
+    task: value.task,
+    output,
+    status,
+    createdAt,
+    userId: value.userId,
+    history,
+  };
+
+  if (typeof value.name === "string" && value.name.trim().length > 0) {
+    schedule.name = value.name;
+  }
+  if (typeof value.lastRun === "string") {
+    schedule.lastRun = value.lastRun;
+  }
+  if (typeof value.nextRun === "string") {
+    schedule.nextRun = value.nextRun;
+  }
+  if (value.type === "cron" && typeof value.cronExpression === "string") {
+    schedule.cronExpression = value.cronExpression;
+  }
+  if (value.type === "once" && typeof value.scheduledTime === "string") {
+    schedule.scheduledTime = value.scheduledTime;
+  }
+
+  return schedule;
+}
+
+function loadSchedulesUnsafe(): ScheduleStore {
   ensureStorageDir();
   if (!existsSync(SCHEDULES_PATH)) {
     return { schedules: [], nextId: 1 };
   }
   try {
-    return JSON.parse(readFileSync(SCHEDULES_PATH, "utf-8")) as ScheduleStore;
-  } catch {
+    const parsed = JSON.parse(readFileSync(SCHEDULES_PATH, "utf-8")) as Partial<ScheduleStore>;
+    const schedules = Array.isArray(parsed.schedules)
+      ? parsed.schedules.map((schedule) => normalizeSchedule(schedule)).filter((schedule): schedule is Schedule => schedule !== null)
+      : [];
+    const maxId = schedules.reduce((currentMax, schedule) => Math.max(currentMax, schedule.id), 0);
+    const nextId = Number.isInteger(parsed.nextId) && (parsed.nextId as number) > maxId
+      ? parsed.nextId as number
+      : maxId + 1;
+    return { schedules, nextId };
+  } catch (err) {
+    logError("task-scheduler", "load_schedules_failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
     return { schedules: [], nextId: 1 };
   }
 }
 
-export function saveSchedules(store: ScheduleStore): void {
+function saveSchedulesUnsafe(store: ScheduleStore): void {
   ensureStorageDir();
   atomicWriteSync(SCHEDULES_PATH, JSON.stringify(store, null, 2));
+}
+
+function mutateSchedules<T>(mutator: (store: ScheduleStore) => T): T {
+  return withStoreLock(() => {
+    const store = loadSchedulesUnsafe();
+    const result = mutator(store);
+    saveSchedulesUnsafe(store);
+    return result;
+  });
+}
+
+export function loadSchedules(): ScheduleStore {
+  return loadSchedulesUnsafe();
+}
+
+export function saveSchedules(store: ScheduleStore): void {
+  withStoreLock(() => saveSchedulesUnsafe(store));
+}
+
+export interface CreateScheduleInput {
+  type: "once" | "cron";
+  jobType?: "prompt" | "shell" | "script";
+  cronExpression?: string;
+  scheduledTime?: string;
+  task: string;
+  output?: "telegram" | "silent" | string;
+  name?: string;
+  userId: string;
+  status?: "active" | "completed" | "cancelled" | "failed";
+  lastRun?: string;
+  nextRun?: string;
+}
+
+export function createSchedule(input: CreateScheduleInput): Schedule {
+  return mutateSchedules((store) => {
+    const schedule: Schedule = {
+      id: store.nextId++,
+      type: input.type,
+      jobType: input.jobType ?? "prompt",
+      task: input.task,
+      output: input.output ?? "telegram",
+      status: input.status ?? "active",
+      createdAt: new Date().toISOString(),
+      userId: input.userId,
+      history: [],
+    };
+
+    if (input.name && input.name.trim().length > 0) {
+      schedule.name = input.name;
+    }
+    if (input.type === "cron" && input.cronExpression) {
+      schedule.cronExpression = input.cronExpression;
+    }
+    if (input.type === "once" && input.scheduledTime) {
+      schedule.scheduledTime = input.scheduledTime;
+      schedule.nextRun = input.nextRun ?? input.scheduledTime;
+    } else if (input.nextRun) {
+      schedule.nextRun = input.nextRun;
+    }
+    if (input.lastRun) {
+      schedule.lastRun = input.lastRun;
+    }
+
+    store.schedules.push(schedule);
+    return schedule;
+  });
 }
 
 // --- Claude CLI execution ---
@@ -333,6 +537,12 @@ async function routeOutput(
 // --- Task execution wrapper ---
 
 async function runScheduledTask(schedule: Schedule): Promise<void> {
+  if (runningSchedules.has(schedule.id)) {
+    warn("task-scheduler", "task_already_running_skip", { id: schedule.id });
+    return;
+  }
+  runningSchedules.add(schedule.id);
+
   const startTime = Date.now();
   const outputTarget = schedule.output ?? "telegram";
   const displayName = schedule.name ? ` (${schedule.name})` : "";
@@ -379,24 +589,34 @@ async function runScheduledTask(schedule: Schedule): Promise<void> {
       success,
     };
 
-    const store = loadSchedules();
-    const stored = store.schedules.find((s) => s.id === schedule.id);
-    if (stored) {
+    mutateSchedules((store) => {
+      const stored = store.schedules.find((s) => s.id === schedule.id);
+      if (!stored) return;
+
       stored.history.push(entry);
-      // Cap history
       if (stored.history.length > MAX_HISTORY_PER_SCHEDULE) {
         stored.history = stored.history.slice(-MAX_HISTORY_PER_SCHEDULE);
       }
       stored.lastRun = entry.timestamp;
 
-      // For one-time schedules, mark completed
       if (stored.type === "once") {
-        stored.status = "completed";
+        // Preserve cancelled state if user cancelled while task was executing.
+        if (stored.status === "active") {
+          stored.status = success ? "completed" : "failed";
+        }
         stored.nextRun = undefined;
+      } else if (stored.status === "active") {
+        const cronJob = activeCronJobs.get(schedule.id);
+        if (cronJob) {
+          try {
+            const nextRun = cronJob.getNextRun();
+            stored.nextRun = nextRun ? nextRun.toISOString() : undefined;
+          } catch {
+            // getNextRun can throw for invalid/removed schedules.
+          }
+        }
       }
-
-      saveSchedules(store);
-    }
+    });
 
     info("task-scheduler", "task_completed", {
       id: schedule.id,
@@ -415,10 +635,10 @@ async function runScheduledTask(schedule: Schedule): Promise<void> {
       error: errorMsg,
     });
 
-    // Record failure in history
-    const store = loadSchedules();
-    const stored = store.schedules.find((s) => s.id === schedule.id);
-    if (stored) {
+    mutateSchedules((store) => {
+      const stored = store.schedules.find((s) => s.id === schedule.id);
+      if (!stored) return;
+
       stored.history.push({
         timestamp: new Date().toISOString(),
         result: `Error: ${errorMsg}`,
@@ -430,11 +650,22 @@ async function runScheduledTask(schedule: Schedule): Promise<void> {
       }
       stored.lastRun = new Date().toISOString();
       if (stored.type === "once") {
-        stored.status = "failed";
+        if (stored.status === "active") {
+          stored.status = "failed";
+        }
         stored.nextRun = undefined;
+      } else if (stored.status === "active") {
+        const cronJob = activeCronJobs.get(schedule.id);
+        if (cronJob) {
+          try {
+            const nextRun = cronJob.getNextRun();
+            stored.nextRun = nextRun ? nextRun.toISOString() : undefined;
+          } catch {
+            // getNextRun can throw for invalid/removed schedules.
+          }
+        }
       }
-      saveSchedules(store);
-    }
+    });
 
     if (notifyUser) {
       await notifyUser(
@@ -442,13 +673,33 @@ async function runScheduledTask(schedule: Schedule): Promise<void> {
         `\u274C Task #${schedule.id}${displayName} failed: ${errorMsg}`
       ).catch(() => {});
     }
+  } finally {
+    runningSchedules.delete(schedule.id);
   }
 }
 
 // --- Scheduling logic ---
 
 function scheduleCronTask(schedule: Schedule): void {
-  if (!schedule.cronExpression) return;
+  if (!schedule.cronExpression) {
+    logError("task-scheduler", "missing_cron_expression", { id: schedule.id });
+    mutateSchedules((store) => {
+      const stored = store.schedules.find((s) => s.id === schedule.id);
+      if (!stored || stored.status !== "active") return;
+      stored.status = "failed";
+      stored.nextRun = undefined;
+      stored.history.push({
+        timestamp: new Date().toISOString(),
+        result: "Schedule is missing cronExpression",
+        duration: 0,
+        success: false,
+      });
+      if (stored.history.length > MAX_HISTORY_PER_SCHEDULE) {
+        stored.history = stored.history.slice(-MAX_HISTORY_PER_SCHEDULE);
+      }
+    });
+    return;
+  }
 
   if (!cron.validate(schedule.cronExpression)) {
     logError("task-scheduler", "invalid_cron", {
@@ -456,6 +707,12 @@ function scheduleCronTask(schedule: Schedule): void {
       cron: schedule.cronExpression,
     });
     return;
+  }
+
+  const existing = activeCronJobs.get(schedule.id);
+  if (existing) {
+    existing.stop();
+    activeCronJobs.delete(schedule.id);
   }
 
   const job = cron.schedule(
@@ -477,12 +734,11 @@ function scheduleCronTask(schedule: Schedule): void {
   try {
     const nextRun = job.getNextRun();
     if (nextRun) {
-      const store = loadSchedules();
-      const stored = store.schedules.find((s) => s.id === schedule.id);
-      if (stored) {
+      mutateSchedules((store) => {
+        const stored = store.schedules.find((s) => s.id === schedule.id);
+        if (!stored || stored.status !== "active") return;
         stored.nextRun = nextRun.toISOString();
-        saveSchedules(store);
-      }
+      });
     }
   } catch {
     // getNextRun may not be available, ignore
@@ -495,43 +751,118 @@ function scheduleCronTask(schedule: Schedule): void {
 }
 
 function scheduleOnceTask(schedule: Schedule): void {
-  if (!schedule.scheduledTime) return;
-
-  const targetTime = new Date(schedule.scheduledTime).getTime();
-  const now = Date.now();
-  const delay = targetTime - now;
-
-  if (delay <= 0) {
-    // Time has passed, run immediately
-    info("task-scheduler", "running_overdue_task", { id: schedule.id });
-    runScheduledTask(schedule).catch((err) => {
-      logError("task-scheduler", "overdue_task_error", {
-        id: schedule.id,
-        error: err instanceof Error ? err.message : String(err),
+  if (!schedule.scheduledTime) {
+    logError("task-scheduler", "missing_once_scheduled_time", { id: schedule.id });
+    mutateSchedules((store) => {
+      const stored = store.schedules.find((s) => s.id === schedule.id);
+      if (!stored || stored.status !== "active") return;
+      stored.status = "failed";
+      stored.nextRun = undefined;
+      stored.history.push({
+        timestamp: new Date().toISOString(),
+        result: "Schedule is missing scheduledTime",
+        duration: 0,
+        success: false,
       });
+      if (stored.history.length > MAX_HISTORY_PER_SCHEDULE) {
+        stored.history = stored.history.slice(-MAX_HISTORY_PER_SCHEDULE);
+      }
     });
     return;
   }
 
-  const timer = setTimeout(() => {
-    activeTimers.delete(schedule.id);
-    runScheduledTask(schedule).catch((err) => {
-      logError("task-scheduler", "once_task_error", {
-        id: schedule.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
+  const targetTime = new Date(schedule.scheduledTime).getTime();
+  if (Number.isNaN(targetTime)) {
+    logError("task-scheduler", "invalid_once_schedule_time", {
+      id: schedule.id,
+      scheduledTime: schedule.scheduledTime,
     });
-  }, delay);
+    mutateSchedules((store) => {
+      const stored = store.schedules.find((s) => s.id === schedule.id);
+      if (!stored || stored.status !== "active") return;
+      stored.status = "failed";
+      stored.nextRun = undefined;
+      stored.history.push({
+        timestamp: new Date().toISOString(),
+        result: `Invalid scheduledTime: ${schedule.scheduledTime}`,
+        duration: 0,
+        success: false,
+      });
+      if (stored.history.length > MAX_HISTORY_PER_SCHEDULE) {
+        stored.history = stored.history.slice(-MAX_HISTORY_PER_SCHEDULE);
+      }
+    });
+    return;
+  }
 
-  // Don't prevent process exit
-  timer.unref();
-  activeTimers.set(schedule.id, timer);
+  const existing = activeTimers.get(schedule.id);
+  if (existing) {
+    clearTimeout(existing);
+    activeTimers.delete(schedule.id);
+  }
+
+  const scheduleChunk = () => {
+    const remaining = targetTime - Date.now();
+    if (remaining <= 0) {
+      activeTimers.delete(schedule.id);
+      info("task-scheduler", "running_overdue_task", { id: schedule.id });
+      runScheduledTask(schedule).catch((err) => {
+        logError("task-scheduler", "overdue_task_error", {
+          id: schedule.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+      return;
+    }
+
+    const delay = Math.min(remaining, MAX_SET_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      if (remaining > MAX_SET_TIMEOUT_MS) {
+        scheduleChunk();
+        return;
+      }
+      activeTimers.delete(schedule.id);
+      runScheduledTask(schedule).catch((err) => {
+        logError("task-scheduler", "once_task_error", {
+          id: schedule.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, delay);
+
+    timer.unref();
+    activeTimers.set(schedule.id, timer);
+
+    if (remaining > MAX_SET_TIMEOUT_MS) {
+      debug("task-scheduler", "once_schedule_chunked_timer", {
+        id: schedule.id,
+        remainingMs: remaining,
+        chunkDelayMs: delay,
+      });
+    }
+  };
+
+  scheduleChunk();
 
   info("task-scheduler", "once_scheduled", {
     id: schedule.id,
     scheduledTime: schedule.scheduledTime,
-    delayMs: delay,
+    delayMs: Math.max(targetTime - Date.now(), 0),
   });
+}
+
+function stopScheduleRuntime(scheduleId: number): void {
+  const cronJob = activeCronJobs.get(scheduleId);
+  if (cronJob) {
+    cronJob.stop();
+    activeCronJobs.delete(scheduleId);
+  }
+
+  const timer = activeTimers.get(scheduleId);
+  if (timer) {
+    clearTimeout(timer);
+    activeTimers.delete(scheduleId);
+  }
 }
 
 // --- Public API ---
@@ -552,40 +883,32 @@ export function cancelSchedule(
   scheduleId: number,
   userId: string
 ): { success: boolean; message: string } {
-  const store = loadSchedules();
-  const schedule = store.schedules.find(
-    (s) => s.id === scheduleId && s.userId === userId
-  );
+  const result = mutateSchedules((store) => {
+    const schedule = store.schedules.find(
+      (s) => s.id === scheduleId && s.userId === userId
+    );
 
-  if (!schedule) {
-    return { success: false, message: `Schedule #${scheduleId} not found.` };
+    if (!schedule) {
+      return { success: false, message: `Schedule #${scheduleId} not found.` };
+    }
+
+    if (schedule.status !== "active") {
+      return {
+        success: false,
+        message: `Schedule #${scheduleId} is already ${schedule.status}.`,
+      };
+    }
+
+    stopScheduleRuntime(scheduleId);
+    schedule.status = "cancelled";
+    schedule.nextRun = undefined;
+    return { success: true, message: `Schedule #${scheduleId} cancelled.` };
+  });
+
+  if (result.success) {
+    info("task-scheduler", "schedule_cancelled", { id: scheduleId });
   }
-
-  if (schedule.status !== "active") {
-    return {
-      success: false,
-      message: `Schedule #${scheduleId} is already ${schedule.status}.`,
-    };
-  }
-
-  // Stop the cron job or timer
-  const cronJob = activeCronJobs.get(scheduleId);
-  if (cronJob) {
-    cronJob.stop();
-    activeCronJobs.delete(scheduleId);
-  }
-
-  const timer = activeTimers.get(scheduleId);
-  if (timer) {
-    clearTimeout(timer);
-    activeTimers.delete(scheduleId);
-  }
-
-  schedule.status = "cancelled";
-  saveSchedules(store);
-
-  info("task-scheduler", "schedule_cancelled", { id: scheduleId });
-  return { success: true, message: `Schedule #${scheduleId} cancelled.` };
+  return result;
 }
 
 /**
