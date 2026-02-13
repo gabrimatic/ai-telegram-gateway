@@ -52,6 +52,12 @@ to discover while searching.
 If you pass text (for example `/clear summarize yesterday`), that text is auto-sent
 as the first prompt in the fresh session.
 
+### `/new`
+
+Alias of `/clear`.
+Supports optional first prompt the same way:
+`/new summarize yesterday`.
+
 ### `/id`
 
 Shows your Telegram user ID.
@@ -80,8 +86,8 @@ Shows process uptime and start timestamp.
 
 - No args or `status`: show current session state and counters.
 - `kill`: force-kill current session and provider process.
-- `new`: start a fresh session.
-- `new <message...>`: start a fresh session and auto-send that message first.
+- `new`: full cleanup and start a fresh session (same reset flow as `/clear`).
+- `new <message...>`: full cleanup, fresh session, then auto-send that message first.
 
 ## Productivity
 

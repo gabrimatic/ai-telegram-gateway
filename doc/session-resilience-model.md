@@ -37,6 +37,7 @@ From Telegram message to final response:
 4. Response validator evaluates output quality.
 5. Failures are classified and tracked in analytics/self-heal.
 6. User gets final response or clear failure message.
+7. Provider auth prompts (for example `/login`) are suppressed and converted to a gateway error response.
 
 ## Circuit Breaker Behavior
 
@@ -83,6 +84,12 @@ Main categories:
 - `unknown`
 
 These categories are used in self-heal pattern detection and alerting language.
+
+Special handling:
+
+- Backend authentication prompts are treated as operational failures.
+- Raw CLI login instructions are not forwarded to end users.
+- Gateway returns a fixed auth-outage error message and emits an admin alert.
 
 ## Self-Heal Behavior
 

@@ -24,6 +24,7 @@ This project runs as a long-polling daemon on a trusted host machine. It gives y
 - Allowlist and pairing-code access control
 - Circuit breaker, watchdog, analytics, and automatic recovery paths
 - Sentinel runtime alerts can trigger automatic self-heal checks
+- Backend auth prompts (like `/login`) are treated as gateway errors, not user-facing replies
 - JSON-file persistence under `~/.claude/` (no database)
 
 ## Platform support
@@ -154,7 +155,7 @@ The command list is registered in [`src/poller.ts`](./src/poller.ts) via `setMyC
 
 The slash suggestion menu includes the full top-level command surface:
 
-- Core/session: `/start`, `/help`, `/menu`, `/stats`, `/clear`, `/id`, `/ping`, `/version`, `/uptime`, `/model`, `/tts`, `/session`
+- Core/session: `/start`, `/help`, `/menu`, `/stats`, `/clear`, `/new`, `/id`, `/ping`, `/version`, `/uptime`, `/model`, `/tts`, `/session`
 - Productivity/info: `/todo`, `/remind`, `/timer`, `/schedule`, `/weather`, `/define`, `/translate`
 - Files/network/system: `/cd`, `/ls`, `/pwd`, `/cat`, `/find`, `/size`, `/curl`, `/net`, `/ps`, `/kill`, `/top`, `/temp`, `/disk`, `/memory`, `/cpu`, `/battery`
 - Operations/monitoring: `/pm2`, `/git`, `/sh`, `/reboot`, `/sentinel`, `/health`, `/analytics`, `/errors`
@@ -202,7 +203,16 @@ npm run pm2:start
 npm run pm2:restart
 npm run pm2:status
 npm run pm2:logs
+npm run pm2:claude-auth:status
+npm run pm2:claude-auth:login
+npm run pm2:shell
 ```
+
+Auth troubleshooting shortcuts:
+
+- `npm run pm2:claude-auth:status`: checks `claude auth status` in the PM2 app context.
+- `npm run pm2:claude-auth:login`: runs interactive `claude auth login` in the PM2 app context.
+- `npm run pm2:shell`: opens an interactive shell with PM2 app env loaded.
 
 ## License
 

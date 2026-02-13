@@ -3,9 +3,11 @@ import { EventEmitter } from "events";
 import * as readline from "readline";
 import { env } from "../../env";
 import { getConfig, ModelName } from "../../config";
-import { info, error as logError, debug } from "../../logger";
+import { info, warn, error as logError, debug } from "../../logger";
 import { cleanupSessionFiles } from "../../files";
 import { CircuitBreaker, CircuitBreakerError } from "../../circuit-breaker";
+import { sendAdminAlert } from "../../alerting";
+import { isAuthFailureText } from "../auth-failure";
 import type { AIBackend, AIResponse, AIStats } from "../types";
 
 interface ContentBlock {
@@ -68,6 +70,7 @@ class ClaudeSession extends EventEmitter {
   private requestStartTime: number = 0;
   private lastActivityTime: number = Date.now();
   private healthCheckTimer: NodeJS.Timeout | null = null;
+  private authFailureDetected: boolean = false;
   private model: ModelName;
   private totalInputTokens: number = 0; // Legacy: last turn input tokens
   private totalOutputTokens: number = 0; // Legacy: last turn output tokens
@@ -263,12 +266,16 @@ class ClaudeSession extends EventEmitter {
           textContent = content;
         }
         if (textContent) {
+          const needsSeparator = this.responseBuffer.length > 0 && !this.responseBuffer.endsWith("\n");
+          const separator = needsSeparator ? "\n\n" : "";
+          const candidateBuffer = this.responseBuffer + separator + textContent;
+          this.markAuthFailureIfDetected(candidateBuffer);
+
           // Add paragraph break between assistant turns if buffer has content
           // that doesn't already end with newlines
-          if (this.responseBuffer.length > 0 && !this.responseBuffer.endsWith('\n')) {
-            const separator = '\n\n';
+          if (needsSeparator) {
             this.responseBuffer += separator;
-            if (this.currentOnChunk) {
+            if (!this.authFailureDetected && this.currentOnChunk) {
               await this.currentOnChunk(separator);
             }
           }
@@ -277,7 +284,7 @@ class ClaudeSession extends EventEmitter {
             this.responseBuffer += textContent;
           }
           // Emit full content as a chunk for streaming callback
-          if (this.currentOnChunk) {
+          if (!this.authFailureDetected && this.currentOnChunk) {
             await this.currentOnChunk(textContent);
           }
         }
@@ -285,10 +292,11 @@ class ClaudeSession extends EventEmitter {
 
       // Content block delta with text - always accumulate and emit chunk if callback exists
       if (msg.type === "content_block_delta" && msg.content) {
+        this.markAuthFailureIfDetected(this.responseBuffer + msg.content);
         if (this.responseBuffer.length < MAX_RESPONSE_BUFFER_SIZE) {
           this.responseBuffer += msg.content;
         }
-        if (this.currentOnChunk) {
+        if (!this.authFailureDetected && this.currentOnChunk) {
           await this.currentOnChunk(msg.content);
         }
       }
@@ -332,18 +340,30 @@ class ClaudeSession extends EventEmitter {
         const finalResponse = msg.result || this.responseBuffer;
         const durationMs = Date.now() - this.requestStartTime;
         if (this.currentResolve) {
-          this.currentResolve({
-            success: true,
-            response: finalResponse.trim(),
-            durationMs,
-            mcpErrors: this.currentMcpErrors.length > 0 ? [...this.currentMcpErrors] : undefined,
-          });
+          if (this.authFailureDetected || isAuthFailureText(finalResponse)) {
+            this.markAuthFailureIfDetected(finalResponse);
+            this.currentResolve({
+              success: false,
+              response: "",
+              error: "AI backend authentication required. Please ask the admin to re-authenticate the CLI.",
+              durationMs,
+              mcpErrors: this.currentMcpErrors.length > 0 ? [...this.currentMcpErrors] : undefined,
+            });
+          } else {
+            this.currentResolve({
+              success: true,
+              response: finalResponse.trim(),
+              durationMs,
+              mcpErrors: this.currentMcpErrors.length > 0 ? [...this.currentMcpErrors] : undefined,
+            });
+          }
           this.currentResolve = null;
         }
         this.responseBuffer = "";
         this.currentMcpErrors = [];
         this.currentOnChunk = null;
         this.isProcessing = false;
+        this.authFailureDetected = false;
         this.processQueue();
       }
     } catch (err) {
@@ -377,6 +397,7 @@ class ClaudeSession extends EventEmitter {
     this.currentOnChunk = onChunk || null;
     this.responseBuffer = "";
     this.currentMcpErrors = [];
+    this.authFailureDetected = false;
     this.requestStartTime = Date.now();
 
     const inputMessage = JSON.stringify({
@@ -570,6 +591,19 @@ class ClaudeSession extends EventEmitter {
 
   getMessageCount(): number {
     return this.messageCount;
+  }
+
+  private markAuthFailureIfDetected(text: string): void {
+    if (this.authFailureDetected || !isAuthFailureText(text)) {
+      return;
+    }
+    this.authFailureDetected = true;
+    warn("claude", "auth_failure_detected", { sessionId: this.sessionId });
+    void sendAdminAlert(
+      "Gateway AI backend auth expired. Re-authenticate the CLI on the host to restore replies.",
+      "critical",
+      "service_down"
+    );
   }
 }
 

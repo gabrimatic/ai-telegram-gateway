@@ -45,3 +45,8 @@ tmp/
 temp/
 *.tmp
 .code-review-*.md
+
+# Credentials that may leak from child CLI sessions
+.credentials.json
+.claude.json
+.claude.json.backup.*

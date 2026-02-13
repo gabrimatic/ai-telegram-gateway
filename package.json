@@ -17,6 +17,9 @@
     "pm2:restart": "./scripts/pm2-restart.sh",
     "pm2:status": "./scripts/pm2-status.sh",
     "pm2:logs": "./scripts/pm2-logs.sh",
+    "pm2:claude-auth:status": "./scripts/pm2-claude-auth-status.sh",
+    "pm2:claude-auth:login": "./scripts/pm2-claude-auth-login.sh",
+    "pm2:shell": "./scripts/pm2-context-shell.sh",
     "e2e": "./scripts/e2e-harness.sh",
     "check:restart-resilience": "./scripts/restart-resilience.sh",
     "check:pm2-daemon": "./scripts/pm2-daemon-resilience.sh"

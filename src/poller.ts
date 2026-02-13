@@ -6,6 +6,7 @@
 import * as fs from "fs";
 import { Bot, Context } from "grammy";
 import { runAI, getStats, isSessionStuck, isSessionRestarting, restartSession, getSessionId } from "./ai";
+import { isAuthFailureText } from "./ai/auth-failure";
 import { getConfig } from "./config";
 import { info, warn, error, debug } from "./logger";
 import { incrementMessages, incrementErrors } from "./health";
@@ -41,6 +42,46 @@ function getFallbackRestartingMessage(): string {
 function getFallbackStuckMessage(): string {
   const providerName = getProviderDisplayName();
   return `Oops, ${providerName} got stuck on something \u{1F605} Restarting now! Try again in about 10 seconds \u{1F44D}`;
+}
+
+const BACKEND_AUTH_ERROR_MESSAGE =
+  "Gateway error: AI backend authentication is unavailable right now. Please try again shortly.";
+
+function hasBackendAuthFailure(result: { error?: string; response?: string }): boolean {
+  return isAuthFailureText(result.error) || isAuthFailureText(result.response);
+}
+
+async function respondBackendAuthFailure(
+  ctx: Context,
+  streamHandler: StreamingResponseHandler,
+  userId: string,
+  requestId: string
+): Promise<void> {
+  streamHandler.cleanup();
+
+  if (!isSessionRestarting()) {
+    restartSession().catch((err) => {
+      error("poller", "restart_after_auth_failure_failed", {
+        error: err instanceof Error ? err.message : String(err),
+      }, requestId);
+    });
+  }
+
+  const currentMessageId = streamHandler.getCurrentMessageId();
+  if (currentMessageId !== null && ctx.chat) {
+    try {
+      await ctx.api.editMessageText(ctx.chat.id, currentMessageId, BACKEND_AUTH_ERROR_MESSAGE, {
+        link_preview_options: { is_disabled: true },
+      } as any);
+      warn("poller", "backend_auth_failure", { userId, mode: "edit" }, requestId);
+      return;
+    } catch {
+      // Fall back to sending a fresh message.
+    }
+  }
+
+  await sendErrorResponse(ctx, BACKEND_AUTH_ERROR_MESSAGE, userId);
+  warn("poller", "backend_auth_failure", { userId, mode: "reply" }, requestId);
 }
 
 /**
@@ -555,6 +596,14 @@ async function handleMessage(ctx: Context): Promise<void> {
     const result = await runAI(prompt, onChunk);
     const responseTimeMs = Date.now() - aiStartTime;
 
+    if (hasBackendAuthFailure(result)) {
+      incrementErrors();
+      recordFailure("unknown");
+      recordSelfHealError("auth_required", result.error || result.response || "auth required");
+      await respondBackendAuthFailure(ctx, streamHandler, userId, requestId);
+      return;
+    }
+
     incrementMessages();
 
     if (result.success) {
@@ -580,6 +629,10 @@ async function handleMessage(ctx: Context): Promise<void> {
       // Check if this was a timeout - offer restart message
       const isTimeout = errorType === "timeout";
       const partialText = streamHandler.getAccumulatedText().trim();
+      if (isAuthFailureText(partialText)) {
+        await respondBackendAuthFailure(ctx, streamHandler, userId, requestId);
+        return;
+      }
       const errorMsg = partialText
         ? partialText // Send whatever partial response we got
         : isTimeout
@@ -596,6 +649,12 @@ async function handleMessage(ctx: Context): Promise<void> {
     streamHandler.cleanup();
     incrementErrors();
     const errorMsg = err instanceof Error ? err.message : String(err);
+    if (isAuthFailureText(errorMsg)) {
+      recordFailure("unknown");
+      recordSelfHealError("auth_required", errorMsg);
+      await respondBackendAuthFailure(ctx, streamHandler, userId, requestId);
+      return;
+    }
     recordSelfHealError("exception", errorMsg);
     error("poller", "message_processing_failed", {
       error: errorMsg,
@@ -686,6 +745,14 @@ async function processTextWithClaude(
     const result = await runAI(prompt, onChunk);
     const responseTimeMs = Date.now() - aiStartTime;
 
+    if (hasBackendAuthFailure(result)) {
+      incrementErrors();
+      recordFailure("unknown");
+      recordSelfHealError("auth_required", result.error || result.response || "auth required");
+      await respondBackendAuthFailure(ctx, streamHandler, userId, requestId);
+      return;
+    }
+
     incrementMessages();
 
     if (result.success) {
@@ -729,6 +796,10 @@ async function processTextWithClaude(
       recordSelfHealError(errorType, result.error || "unknown");
       const isTimeout = errorType === "timeout";
       const partialText = streamHandler.getAccumulatedText().trim();
+      if (isAuthFailureText(partialText)) {
+        await respondBackendAuthFailure(ctx, streamHandler, userId, requestId);
+        return;
+      }
       const errorMsg = partialText
         ? partialText
         : isTimeout
@@ -745,6 +816,12 @@ async function processTextWithClaude(
     streamHandler.cleanup();
     incrementErrors();
     const errorMsg = err instanceof Error ? err.message : String(err);
+    if (isAuthFailureText(errorMsg)) {
+      recordFailure("unknown");
+      recordSelfHealError("auth_required", errorMsg);
+      await respondBackendAuthFailure(ctx, streamHandler, userId, requestId);
+      return;
+    }
     recordSelfHealError("exception", errorMsg);
     error("poller", "message_processing_failed", {
       error: errorMsg,
@@ -860,7 +937,8 @@ export async function createBot(
       { command: "help", description: "Show all commands" },
       { command: "menu", description: "Open visual command center" },
       { command: "stats", description: "Gateway runtime stats" },
-      { command: "clear", description: "New or fresh session start" },
+      { command: "clear", description: "Full cleanup + fresh session" },
+      { command: "new", description: "Alias of /clear" },
       { command: "id", description: "Show your Telegram ID" },
       { command: "ping", description: "Latency check" },
       { command: "version", description: "Gateway version info" },

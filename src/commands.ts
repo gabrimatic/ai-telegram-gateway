@@ -380,7 +380,7 @@ export function buildHelpText(options: {
   lines.push("");
   lines.push("\uD83D\uDCAC *CHAT & SESSION*");
   lines.push("/start /help /stats /id /version /uptime /ping");
-  lines.push("/model /tts /clear");
+  lines.push("/model /tts /clear /new");
   lines.push("Interaction cues: `again`, `shorter`, `deeper`");
 
   if (options.isAdmin) {
@@ -494,6 +494,7 @@ export async function handleCommand(
         timer: "timer",
         weather: "weather",
         clear: "clear",
+        new: "new",
       };
       if (startAction && deepLinkRoute[startAction]) {
         return await handleCommand(ctx, deepLinkRoute[startAction], "");
@@ -543,6 +544,11 @@ export async function handleCommand(
     }
 
     case "clear": {
+      await resetSessionAndMaybeSendPrompt(ctx, args);
+      return true;
+    }
+
+    case "new": {
       await resetSessionAndMaybeSendPrompt(ctx, args);
       return true;
     }
@@ -1575,7 +1581,7 @@ Or pass an absolute path.`, { parse_mode: "Markdown" });
           sessInfo += `Healthy: ${sessStats.isHealthy ? ICONS.success : ICONS.error}`;
         }
 
-        sessInfo += `\n\nUse \`/session kill\` or \`/session new\``;
+        sessInfo += `\n\nUse \`/session kill\`, \`/session new [message]\`, or \`/clear [message]\``;
         await ctx.reply(sessInfo, { parse_mode: "Markdown", reply_markup: sessionKeyboard });
         return true;
       }
@@ -1594,20 +1600,15 @@ Or pass an absolute path.`, { parse_mode: "Markdown" });
       }
 
       if (sessionSub === "new") {
-        await ctx.reply("\u{1F504} Starting fresh session...");
-        stopSession();
-        await new Promise(resolve => setTimeout(resolve, 500));
-        await restartSession();
-        await ctx.reply(`${ICONS.success} New session started!`);
-        if (firstPrompt.trim()) {
-          await ctx.reply("Sending your first message in the fresh session...");
-          await forwardToClaude(ctx, firstPrompt);
-        }
+        await resetSessionAndMaybeSendPrompt(ctx, firstPrompt);
         return true;
       }
 
       // Unknown subcommand - show usage
-      await ctx.reply(`\u{1F5A5} *Session Commands:*\n\`/session\` - Show status\n\`/session kill\` - Force kill\n\`/session new [message]\` - Fresh session (optionally auto-send first message)`, { parse_mode: "Markdown" });
+      await ctx.reply(
+        `\u{1F5A5} *Session Commands:*\n\`/session\` - Show status\n\`/session kill\` - Force kill\n\`/session new [message]\` - Fresh session (optionally auto-send first message)\n\`/clear [message]\` or \`/new [message]\` - Full cleanup + fresh session`,
+        { parse_mode: "Markdown" }
+      );
       return true;
     }
 
