@@ -20,6 +20,9 @@ export interface AIStats {
   isHealthy: boolean;
   lastActivityMs: number;
   model: ModelName;
+  totalInputTokens?: number;
+  totalOutputTokens?: number;
+  contextWindow?: number;
 }
 
 export interface AIBackend {

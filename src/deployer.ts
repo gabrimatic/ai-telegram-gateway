@@ -63,8 +63,13 @@ function resetToIdle(): void {
   deployPending = false;
 }
 
-function exec(cmd: string): string {
-  return execSync(cmd, { cwd: env.TG_PROJECT_DIR, encoding: "utf-8" });
+function exec(cmd: string, timeoutMs: number = 30000): string {
+  return execSync(cmd, {
+    cwd: env.TG_PROJECT_DIR,
+    encoding: "utf-8",
+    timeout: timeoutMs,
+    maxBuffer: 5 * 1024 * 1024,
+  });
 }
 
 function sleep(ms: number): Promise<void> {

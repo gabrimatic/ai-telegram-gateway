@@ -1,3 +1,11 @@
+/**
+ * Legacy Claude CLI integration module.
+ * NOTE: The active implementation is in src/ai/providers/claude-cli.ts
+ * This file is kept for backward compatibility with imports but should
+ * not be used directly. New code should use the AI provider abstraction
+ * layer in src/ai/index.ts.
+ */
+
 import { spawn, ChildProcess } from "child_process";
 import { EventEmitter } from "events";
 import * as readline from "readline";
@@ -124,6 +132,7 @@ class ClaudeSession extends EventEmitter {
       claudePath,
       [
         "--print",
+        "--verbose",
         "--dangerously-skip-permissions",
         "--input-format",
         "stream-json",

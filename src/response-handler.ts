@@ -21,6 +21,38 @@ import {
   validateFileSendPath,
 } from "./files";
 import { loadAllowlist, isAdminUser } from "./storage";
+import { getCurrentModel, getStats as getAIStats } from "./ai";
+import * as os from "os";
+
+/** Format token count as compact string (e.g. 12k, 150k) */
+function formatTokens(n: number): string {
+  if (n >= 1000) return Math.round(n / 1000) + "k";
+  return String(n);
+}
+
+/** Build a small context footer for AI responses */
+function buildContextFooter(): string {
+  const stats = getAIStats();
+  const cwd = process.cwd();
+  const home = os.homedir();
+  let short: string;
+  if (cwd === home) {
+    short = "~";
+  } else {
+    const displayCwd = cwd.startsWith(home) ? "~" + cwd.slice(home.length) : cwd;
+    short = displayCwd.split("/").slice(-2).join("/");
+  }
+
+  let contextPart: string;
+  if (stats?.totalInputTokens && stats.contextWindow) {
+    const used = stats.totalInputTokens + (stats.totalOutputTokens || 0);
+    contextPart = `${formatTokens(used)}/${formatTokens(stats.contextWindow)}`;
+  } else {
+    contextPart = getCurrentModel();
+  }
+
+  return `\n\n\u2014\n${contextPart} \u00b7 ${short}`;
+}
 
 /** Convert standard markdown to Telegram MarkdownV2 format */
 function toTelegramMarkdown(text: string): string {
@@ -65,6 +97,10 @@ export class StreamingResponseHandler {
     this.typingInterval = setInterval(() => {
       this.ctx.replyWithChatAction("typing").catch(() => {});
     }, this.TYPING_INTERVAL_MS);
+    // Don't prevent process exit
+    if (this.typingInterval && typeof this.typingInterval.unref === "function") {
+      this.typingInterval.unref();
+    }
   }
 
   stopTypingIndicator(): void {
@@ -149,6 +185,10 @@ export class StreamingResponseHandler {
         });
       });
     }, delay);
+    // Don't prevent process exit during graceful shutdown
+    if (this.pendingEditTimeout && typeof this.pendingEditTimeout.unref === "function") {
+      this.pendingEditTimeout.unref();
+    }
   }
 
   private async performEdit(): Promise<void> {
@@ -231,6 +271,14 @@ export class StreamingResponseHandler {
 
     // Perform final edit
     await this.performEdit();
+
+    // Append context footer
+    if (this.currentMessageId !== null && !this.accumulateOnly) {
+      const footer = buildContextFooter();
+      this.accumulatedText += footer;
+      this.lastSentText = ""; // Force re-edit
+      await this.performEdit();
+    }
 
     // Process any <send-file> tags in the accumulated text
     await this.processFileTags();
@@ -350,17 +398,47 @@ export class StreamingResponseHandler {
     }
   }
 
+  /** Check if a Telegram error is retryable (rate limit, server error) */
+  private isRetryableError(err: unknown): boolean {
+    if (!(err instanceof Error)) return false;
+    const msg = err.message;
+    // Telegram rate limiting (429)
+    if (msg.includes("429") || msg.includes("Too Many Requests") || msg.includes("retry after")) return true;
+    // Telegram server errors (5xx)
+    if (/5\d\d/.test(msg)) return true;
+    // Network errors
+    if (msg.includes("ETIMEDOUT") || msg.includes("ECONNRESET") || msg.includes("network")) return true;
+    return false;
+  }
+
+  /** Retry a Telegram API call once after a short delay for transient errors */
+  private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if (this.isRetryableError(err)) {
+        // Wait 1-2 seconds for rate limits
+        const delay = err instanceof Error && err.message.includes("retry after")
+          ? 2000
+          : 1000;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return await fn();
+      }
+      throw err;
+    }
+  }
+
   /** Send message with MarkdownV2 parse mode, fallback to plain text */
   private async sendWithMarkdown(text: string): Promise<{ message_id: number }> {
     const safeText = this.clipForTelegram(text);
     const markdownText = toTelegramMarkdown(safeText);
     try {
       if (markdownText.length <= 4096) {
-        return await this.ctx.reply(markdownText, { parse_mode: "MarkdownV2" });
+        return await this.withRetry(() => this.ctx.reply(markdownText, { parse_mode: "MarkdownV2" }));
       }
-      return await this.ctx.reply(safeText);
+      return await this.withRetry(() => this.ctx.reply(safeText));
     } catch {
-      return await this.ctx.reply(safeText);
+      return await this.withRetry(() => this.ctx.reply(safeText));
     }
   }
 
@@ -370,12 +448,16 @@ export class StreamingResponseHandler {
     const markdownText = toTelegramMarkdown(safeText);
     try {
       if (markdownText.length <= 4096) {
-        await this.ctx.api.editMessageText(chatId, messageId, markdownText, { parse_mode: "MarkdownV2" });
+        await this.withRetry(() => this.ctx.api.editMessageText(chatId, messageId, markdownText, { parse_mode: "MarkdownV2" }));
       } else {
-        await this.ctx.api.editMessageText(chatId, messageId, safeText);
+        await this.withRetry(() => this.ctx.api.editMessageText(chatId, messageId, safeText));
       }
     } catch {
-      await this.ctx.api.editMessageText(chatId, messageId, safeText);
+      try {
+        await this.ctx.api.editMessageText(chatId, messageId, safeText);
+      } catch {
+        // If even plain text edit fails, silently give up (message content was already partially sent)
+      }
     }
   }
 
@@ -404,6 +486,7 @@ export interface SendResponseOptions {
   text: string;
   includeAudio?: boolean;
   userId?: string;
+  skipFooter?: boolean;
 }
 
 /**
@@ -415,7 +498,7 @@ export async function sendResponse(
   options: SendResponseOptions
 ): Promise<void> {
   const config = getConfig();
-  const { text, includeAudio = false, userId } = options;
+  const { text, includeAudio = false, userId, skipFooter = false } = options;
 
   if (!text || text.trim().length === 0) {
     await ctx.reply("(empty response)");
@@ -543,10 +626,11 @@ export async function sendResponse(
 
   // Text response: send remaining text only if there's content
   if (remainingText && remainingText.trim().length > 0) {
+    const fullText = skipFooter ? remainingText : remainingText + buildContextFooter();
     try {
-      await ctx.reply(toTelegramMarkdown(remainingText), { parse_mode: "MarkdownV2" });
+      await ctx.reply(toTelegramMarkdown(fullText), { parse_mode: "MarkdownV2" });
     } catch {
-      await ctx.reply(remainingText);
+      await ctx.reply(fullText);
     }
   }
 }
@@ -556,7 +640,7 @@ export async function sendResponse(
  */
 export async function sendErrorResponse(ctx: Context, error: string, userId?: string): Promise<void> {
   const text = error || "An error occurred processing your request.";
-  await sendResponse(ctx, { text, includeAudio: false, userId });
+  await sendResponse(ctx, { text, includeAudio: false, userId, skipFooter: true });
 }
 
 /**

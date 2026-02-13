@@ -187,12 +187,21 @@ async function checkErrorRateSpike(): Promise<void> {
 
 // --- Watchdog cycle ---
 
+let watchdogCycleInProgress = false;
+
 async function watchdogCycle(): Promise<void> {
+  // Guard against overlapping cycles (previous cycle still running)
+  if (watchdogCycleInProgress) {
+    debug("watchdog", "cycle_skipped_already_running");
+    return;
+  }
+  watchdogCycleInProgress = true;
+
   debug("watchdog", "cycle_start");
 
   try {
     // Run all checks in parallel where possible
-    await Promise.allSettled([
+    const results = await Promise.allSettled([
       checkDiskSpace(),
       checkMemoryUsage(),
       checkCpuLoad(),
@@ -202,6 +211,18 @@ async function watchdogCycle(): Promise<void> {
       checkErrorRateSpike(),
     ]);
 
+    // Log any rejected checks for diagnostics
+    const checkNames = ["disk", "memory", "cpu", "pm2", "docker", "network", "errorRate"];
+    for (let i = 0; i < results.length; i++) {
+      if (results[i].status === "rejected") {
+        const reason = (results[i] as PromiseRejectedResult).reason;
+        debug("watchdog", "check_failed", {
+          check: checkNames[i],
+          error: reason instanceof Error ? reason.message : String(reason),
+        });
+      }
+    }
+
     // Run self-healing checks
     await runSelfHealingChecks();
 
@@ -209,6 +230,8 @@ async function watchdogCycle(): Promise<void> {
     logError("watchdog", "cycle_failed", {
       error: err instanceof Error ? err.message : String(err),
     });
+  } finally {
+    watchdogCycleInProgress = false;
   }
 
   debug("watchdog", "cycle_complete");

@@ -29,21 +29,45 @@ export interface TranscriptionResult {
 
 /**
  * Download a file from a URL to a local path
+ * Handles redirects (up to 5 hops) and cleans up on failure.
  */
-async function downloadFile(url: string, destPath: string): Promise<void> {
+async function downloadFile(url: string, destPath: string, maxRedirects: number = 5): Promise<void> {
+  if (maxRedirects <= 0) {
+    throw new Error("Too many redirects during file download");
+  }
+
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(destPath);
+    let settled = false;
 
-    https.get(url, (response) => {
+    const cleanup = () => {
+      try {
+        if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
+      } catch {
+        // Ignore cleanup errors
+      }
+    };
+
+    const settle = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (err) {
+        file.close(() => cleanup());
+        reject(err);
+      } else {
+        resolve();
+      }
+    };
+
+    const req = https.get(url, { timeout: 30000 }, (response) => {
       // Handle redirects
       if (response.statusCode === 301 || response.statusCode === 302) {
         const redirectUrl = response.headers.location;
         if (redirectUrl) {
-          // Drain response to free the socket
           response.resume();
           file.close(() => {
-            if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
-            downloadFile(redirectUrl, destPath).then(resolve).catch(reject);
+            cleanup();
+            downloadFile(redirectUrl, destPath, maxRedirects - 1).then(resolve).catch(reject);
           });
           return;
         }
@@ -51,29 +75,22 @@ async function downloadFile(url: string, destPath: string): Promise<void> {
 
       if (response.statusCode !== 200) {
         response.resume();
-        file.close(() => {
-          if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
-          reject(new Error(`Download failed with status ${response.statusCode}`));
-        });
+        settle(new Error(`Download failed with status ${response.statusCode}`));
         return;
       }
 
       response.pipe(file);
       file.on("finish", () => {
-        file.close(() => resolve());
+        file.close(() => settle());
       });
-      file.on("error", (err) => {
-        file.close(() => {
-          if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
-          reject(err);
-        });
-      });
-    }).on("error", (err) => {
-      file.close();
-      if (fs.existsSync(destPath)) {
-        fs.unlinkSync(destPath);
-      }
-      reject(err);
+      file.on("error", (err) => settle(err));
+      response.on("error", (err) => settle(err));
+    });
+
+    req.on("error", (err) => settle(err));
+    req.on("timeout", () => {
+      req.destroy();
+      settle(new Error("Download timed out after 30 seconds"));
     });
   });
 }

@@ -32,13 +32,27 @@ export function safeCalc(expression: string): string {
     return "Invalid expression. Use only numbers and +, -, *, /, %, ^, (, )";
   }
 
+  // Reject expressions that are too long (potential DoS via deeply nested expressions)
+  if (sanitized.length > 200) {
+    return "Expression too long (max 200 characters)";
+  }
+
+  // Reject deeply nested parentheses
+  let depth = 0;
+  for (const ch of sanitized) {
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (depth > 10) return "Too many nested parentheses (max 10)";
+  }
+  if (depth !== 0) return "Unbalanced parentheses";
+
   try {
     // Replace ^ with ** for exponentiation
     const jsExpr = sanitized.replace(/\^/g, "**");
     // Use Function constructor instead of eval for slightly safer execution
-    const result = new Function(`return (${jsExpr})`)();
+    const result = new Function(`"use strict"; return (${jsExpr})`)();
     if (typeof result !== "number" || !isFinite(result)) {
-      return "Invalid result";
+      return "Invalid result (infinity or NaN)";
     }
     return `${expression} = ${result}`;
   } catch {

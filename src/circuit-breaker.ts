@@ -94,6 +94,7 @@ export class CircuitBreaker {
   }
 
   private transitionTo(newState: CircuitBreakerState): void {
+    const previousState = this.state;
     this.state = newState;
     if (newState === "closed") {
       this.failureCount = 0;
@@ -101,5 +102,27 @@ export class CircuitBreaker {
     } else if (newState === "half-open") {
       this.successCount = 0;
     }
+    // Emit transition for observability (can be hooked by callers)
+    if (previousState !== newState && this.onStateChange) {
+      try {
+        this.onStateChange(previousState, newState);
+      } catch {
+        // Ignore callback errors
+      }
+    }
+  }
+
+  /** Optional callback for state transitions */
+  onStateChange: ((from: CircuitBreakerState, to: CircuitBreakerState) => void) | null = null;
+
+  /** Get failure count for diagnostics */
+  getFailureCount(): number {
+    return this.failureCount;
+  }
+
+  /** Get time since last failure in ms, or null if no failures recorded */
+  getTimeSinceLastFailure(): number | null {
+    if (this.lastFailureTime === null) return null;
+    return Date.now() - this.lastFailureTime;
   }
 }

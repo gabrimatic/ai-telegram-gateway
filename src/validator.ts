@@ -27,17 +27,26 @@ function similarity(a: string, b: string): number {
   const shorter = a.length < b.length ? a : b;
   const longer = a.length >= b.length ? a : b;
 
+  // For very short strings, use simple equality check
+  if (shorter.length < 50) {
+    return shorter === longer ? 1 : 0;
+  }
+
   let matches = 0;
   const windowSize = Math.min(50, shorter.length);
 
-  for (let i = 0; i <= shorter.length - windowSize; i += 10) {
+  // Cap the number of comparisons to prevent O(n*m) on very long strings
+  const maxIterations = Math.min(Math.ceil((shorter.length - windowSize) / 10) + 1, 100);
+  const step = Math.max(10, Math.floor(shorter.length / maxIterations));
+
+  for (let i = 0; i <= shorter.length - windowSize; i += step) {
     const chunk = shorter.substring(i, i + windowSize);
     if (longer.includes(chunk)) {
       matches++;
     }
   }
 
-  const totalWindows = Math.ceil((shorter.length - windowSize) / 10) + 1;
+  const totalWindows = Math.ceil((shorter.length - windowSize) / step) + 1;
   return totalWindows > 0 ? matches / totalWindows : 0;
 }
 

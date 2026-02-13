@@ -7,15 +7,9 @@ import { dirname, join } from "path";
 import { error } from "./logger";
 import {
   ALLOWLIST_PATH,
-  TODOS_PATH,
-  NOTES_PATH,
-  REMINDERS_PATH,
 } from "./constants";
 import type {
   Allowlist,
-  TodoList,
-  NotesList,
-  RemindersList,
 } from "./types";
 
 // Simple mutex for allowlist operations
@@ -45,9 +39,45 @@ export async function withAllowlistLock<T>(fn: () => T): Promise<T> {
  * Atomic write: write to temp file then rename (prevents corruption on crash)
  */
 function atomicWriteSync(filePath: string, content: string): void {
-  const tempPath = join(dirname(filePath), `.${Date.now()}.tmp`);
-  writeFileSync(tempPath, content);
-  renameSync(tempPath, filePath);
+  const dir = dirname(filePath);
+  // Ensure parent directory exists
+  if (!existsSync(dir)) {
+    const { mkdirSync } = require("fs");
+    mkdirSync(dir, { recursive: true });
+  }
+  const tempPath = join(dir, `.${Date.now()}.tmp`);
+  try {
+    writeFileSync(tempPath, content);
+    renameSync(tempPath, filePath);
+  } catch (err) {
+    // Clean up temp file if rename failed
+    try {
+      if (existsSync(tempPath)) {
+        const { unlinkSync } = require("fs");
+        unlinkSync(tempPath);
+      }
+    } catch {
+      // Ignore cleanup errors
+    }
+    throw err;
+  }
+}
+
+/**
+ * Safely parse JSON with fallback. Logs corruption but doesn't crash.
+ */
+function safeJsonParse<T>(content: string, fallback: T, context: string): T {
+  try {
+    return JSON.parse(content) as T;
+  } catch (err) {
+    error("storage", "json_parse_failed", {
+      context,
+      error: err instanceof Error ? err.message : String(err),
+      contentLength: content.length,
+      contentPreview: content.substring(0, 100),
+    });
+    return fallback;
+  }
 }
 
 export function generatePairingCode(): string {
@@ -75,7 +105,22 @@ export function loadAllowlistSync(): Allowlist {
 
   try {
     const content = readFileSync(ALLOWLIST_PATH, "utf-8");
-    return JSON.parse(content) as Allowlist;
+    const parsed = safeJsonParse<Allowlist>(content, {
+      allowedUsers: [],
+      pairingEnabled: false,
+      pairingCode: "",
+    }, "allowlist");
+    // Validate structure to guard against partially corrupted data
+    if (!Array.isArray(parsed.allowedUsers)) {
+      parsed.allowedUsers = [];
+    }
+    if (typeof parsed.pairingEnabled !== "boolean") {
+      parsed.pairingEnabled = false;
+    }
+    if (typeof parsed.pairingCode !== "string") {
+      parsed.pairingCode = "";
+    }
+    return parsed;
   } catch (err) {
     error("storage", "allowlist_load_failed", {
       error: err instanceof Error ? err.message : String(err),
@@ -100,47 +145,3 @@ export async function saveAllowlist(allowlist: Allowlist): Promise<void> {
   return withAllowlistLock(() => saveAllowlistSync(allowlist));
 }
 
-export function loadTodos(): TodoList {
-  if (!existsSync(TODOS_PATH)) {
-    return { items: [], nextId: 1 };
-  }
-  try {
-    return JSON.parse(readFileSync(TODOS_PATH, "utf-8")) as TodoList;
-  } catch {
-    return { items: [], nextId: 1 };
-  }
-}
-
-export function saveTodos(todos: TodoList): void {
-  atomicWriteSync(TODOS_PATH, JSON.stringify(todos, null, 2));
-}
-
-export function loadNotes(): NotesList {
-  if (!existsSync(NOTES_PATH)) {
-    return { items: [], nextId: 1 };
-  }
-  try {
-    return JSON.parse(readFileSync(NOTES_PATH, "utf-8")) as NotesList;
-  } catch {
-    return { items: [], nextId: 1 };
-  }
-}
-
-export function saveNotes(notes: NotesList): void {
-  atomicWriteSync(NOTES_PATH, JSON.stringify(notes, null, 2));
-}
-
-export function loadReminders(): RemindersList {
-  if (!existsSync(REMINDERS_PATH)) {
-    return { items: [], nextId: 1 };
-  }
-  try {
-    return JSON.parse(readFileSync(REMINDERS_PATH, "utf-8")) as RemindersList;
-  } catch {
-    return { items: [], nextId: 1 };
-  }
-}
-
-export function saveReminders(reminders: RemindersList): void {
-  atomicWriteSync(REMINDERS_PATH, JSON.stringify(reminders, null, 2));
-}

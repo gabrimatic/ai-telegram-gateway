@@ -37,6 +37,7 @@ let statsLogInterval: NodeJS.Timeout | null = null;
 let consecutiveHealthFailures = 0;
 const MAX_CONSECUTIVE_HEALTH_FAILURES = 3;
 let healthDirEnsured = false;
+let healthCheckInProgress = false;
 
 function ensureHealthFileDir(): void {
   if (healthDirEnsured) {
@@ -95,6 +96,14 @@ function writeHealthFile(resourceStatus: ResourceCheckResult | null): void {
 }
 
 async function checkHealth(): Promise<void> {
+  // Guard against re-entrant health checks (previous check still running)
+  if (healthCheckInProgress) {
+    debug("health", "check_skipped_already_running");
+    return;
+  }
+  healthCheckInProgress = true;
+
+  try {
   debug("health", "checking");
 
   const config = getConfig();
@@ -209,6 +218,9 @@ async function checkHealth(): Promise<void> {
   // Update uptime
   stats.uptimeSeconds = Math.floor((Date.now() - stats.startedAt.getTime()) / 1000);
   writeHealthFile(resourceStatus);
+  } finally {
+    healthCheckInProgress = false;
+  }
 }
 
 function logStats(): void {

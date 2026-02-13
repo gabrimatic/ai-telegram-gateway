@@ -13,6 +13,13 @@ import { info, error as logError, debug } from "./logger";
 const ANALYTICS_DIR = join(homedir(), ".claude", "gateway", "analytics");
 const RETENTION_DAYS = 30;
 
+// In-memory cache for today's analytics to avoid disk I/O on every message
+let cachedDay: DailyAnalytics | null = null;
+let cachedDayKey: string | null = null;
+let cacheDirty = false;
+let flushTimer: NodeJS.Timeout | null = null;
+const FLUSH_INTERVAL_MS = 5000; // Flush to disk every 5 seconds if dirty
+
 export interface DailyAnalytics {
   date: string;
   messages: {
@@ -60,7 +67,7 @@ function filePath(dateKey: string): string {
   return join(ANALYTICS_DIR, `${dateKey}.json`);
 }
 
-function loadDay(dateKey: string): DailyAnalytics {
+function loadDayFromDisk(dateKey: string): DailyAnalytics {
   const path = filePath(dateKey);
   if (!existsSync(path)) {
     return emptyDailyAnalytics(dateKey);
@@ -73,9 +80,60 @@ function loadDay(dateKey: string): DailyAnalytics {
   }
 }
 
-function saveDay(data: DailyAnalytics): void {
+function loadDay(dateKey: string): DailyAnalytics {
+  // Use cache for today's data
+  if (dateKey === cachedDayKey && cachedDay) {
+    return cachedDay;
+  }
+  // If requesting a different day than cached, flush the cache first
+  if (cachedDay && cachedDayKey && cacheDirty) {
+    saveDayToDisk(cachedDay);
+    cacheDirty = false;
+  }
+  const data = loadDayFromDisk(dateKey);
+  // Only cache today's data
+  if (dateKey === todayKey()) {
+    cachedDay = data;
+    cachedDayKey = dateKey;
+  }
+  return data;
+}
+
+function saveDayToDisk(data: DailyAnalytics): void {
   ensureDir();
-  writeFileSync(filePath(data.date), JSON.stringify(data, null, 2));
+  try {
+    writeFileSync(filePath(data.date), JSON.stringify(data, null, 2));
+  } catch (err) {
+    logError("analytics", "save_day_failed", {
+      date: data.date,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+function saveDay(data: DailyAnalytics): void {
+  // For today, just mark dirty and rely on periodic flush
+  const key = todayKey();
+  if (data.date === key) {
+    cachedDay = data;
+    cachedDayKey = key;
+    cacheDirty = true;
+    return;
+  }
+  // For other days, write immediately
+  saveDayToDisk(data);
+}
+
+function flushAnalyticsCache(): void {
+  if (cachedDay && cacheDirty) {
+    saveDayToDisk(cachedDay);
+    cacheDirty = false;
+  }
+  // Handle day rollover: if cached day is no longer today, clear cache
+  if (cachedDayKey && cachedDayKey !== todayKey()) {
+    cachedDay = null;
+    cachedDayKey = null;
+  }
 }
 
 // Keep response times array from growing unbounded (keep last 500 per day)
@@ -253,14 +311,20 @@ function summarizeDays(days: DailyAnalytics[], periodLabel: string): AnalyticsSu
 function loadDaysRange(numDays: number): DailyAnalytics[] {
   const result: DailyAnalytics[] = [];
   const now = new Date();
+  const today = todayKey();
 
   for (let i = 0; i < numDays; i++) {
     const d = new Date(now);
     d.setDate(d.getDate() - i);
     const key = d.toISOString().split("T")[0];
-    const path = filePath(key);
-    if (existsSync(path)) {
+    // For today, always include (may be in cache with no file yet)
+    if (key === today) {
       result.push(loadDay(key));
+    } else {
+      const path = filePath(key);
+      if (existsSync(path)) {
+        result.push(loadDayFromDisk(key));
+      }
     }
   }
   return result;
@@ -377,10 +441,25 @@ export function cleanOldAnalytics(): void {
 }
 
 /**
- * Initialize analytics: ensure directory exists and clean old data.
+ * Initialize analytics: ensure directory exists, clean old data, start flush timer.
  */
 export function initAnalytics(): void {
   ensureDir();
   cleanOldAnalytics();
+  // Start periodic flush timer
+  if (flushTimer) clearInterval(flushTimer);
+  flushTimer = setInterval(flushAnalyticsCache, FLUSH_INTERVAL_MS);
+  flushTimer.unref();
   info("analytics", "initialized", { dir: ANALYTICS_DIR });
+}
+
+/**
+ * Stop analytics and flush any pending data to disk.
+ */
+export function stopAnalytics(): void {
+  if (flushTimer) {
+    clearInterval(flushTimer);
+    flushTimer = null;
+  }
+  flushAnalyticsCache();
 }

@@ -150,6 +150,13 @@ export async function startWhisperKitServer(): Promise<boolean> {
       logError("service-manager", "whisperkit_spawn_error", {
         error: err.message,
       });
+      whisperKitProcess = null;
+    });
+
+    // Handle unexpected exit
+    whisperKitProcess.on("exit", (code, signal) => {
+      debug("service-manager", "whisperkit_process_exited", { code, signal });
+      whisperKitProcess = null;
     });
 
     whisperKitProcess.unref();

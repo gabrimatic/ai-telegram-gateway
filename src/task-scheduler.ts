@@ -4,7 +4,7 @@
  * Uses node-cron for cron-based scheduling.
  */
 
-import { spawn } from "child_process";
+import { spawn, exec, execFile } from "child_process";
 import * as readline from "readline";
 import {
   existsSync,
@@ -12,8 +12,9 @@ import {
   readFileSync,
   writeFileSync,
   renameSync,
+  appendFileSync,
 } from "fs";
-import { dirname, join } from "path";
+import { dirname, join, extname } from "path";
 import { homedir } from "os";
 import * as cron from "node-cron";
 import { env } from "./env";
@@ -32,9 +33,12 @@ export interface ScheduleHistoryEntry {
 export interface Schedule {
   id: number;
   type: "once" | "cron";
+  jobType: "prompt" | "shell" | "script";
   cronExpression?: string;
   scheduledTime?: string; // ISO string for one-time
-  task: string;
+  task: string; // prompt text, shell command, or script path
+  output: "telegram" | "silent" | string; // "file:/path" or "email:addr"
+  name?: string; // human-readable name
   status: "active" | "completed" | "cancelled" | "failed";
   createdAt: string;
   lastRun?: string;
@@ -226,26 +230,145 @@ async function executeClaudeTask(task: string): Promise<{ output: string; succes
   });
 }
 
+// --- Shell / Script execution ---
+
+/**
+ * Execute a shell command with timeout.
+ */
+async function executeShellTask(command: string): Promise<{ output: string; success: boolean }> {
+  return new Promise((resolve) => {
+    exec(command, { timeout: TASK_TIMEOUT_MS, cwd: env.TG_WORKING_DIR }, (err, stdout, stderr) => {
+      if (err) {
+        const combined = (stdout + "\n" + stderr).trim() || err.message;
+        resolve({ output: combined, success: false });
+      } else {
+        resolve({ output: (stdout + "\n" + stderr).trim() || "(no output)", success: true });
+      }
+    });
+  });
+}
+
+/**
+ * Execute a script file with the appropriate interpreter.
+ */
+async function executeScriptTask(scriptPath: string): Promise<{ output: string; success: boolean }> {
+  const ext = extname(scriptPath).toLowerCase();
+  let command: string;
+  switch (ext) {
+    case ".sh":
+      command = `bash "${scriptPath}"`;
+      break;
+    case ".py":
+      command = `python3 "${scriptPath}"`;
+      break;
+    case ".js":
+      command = `node "${scriptPath}"`;
+      break;
+    case ".ts":
+      command = `npx ts-node "${scriptPath}"`;
+      break;
+    default:
+      return { output: `Unsupported script extension: ${ext}`, success: false };
+  }
+  return executeShellTask(command);
+}
+
+// --- Output routing ---
+
+/**
+ * Route task output based on schedule.output setting.
+ */
+async function routeOutput(
+  schedule: Schedule,
+  taskOutput: string,
+  success: boolean,
+  durationMs: number
+): Promise<void> {
+  const outputTarget = schedule.output ?? "telegram";
+  const statusIcon = success ? "\u2705" : "\u274C";
+  const truncatedOutput = taskOutput.length > 1500
+    ? taskOutput.substring(0, 1500) + "... (truncated)"
+    : taskOutput;
+  const displayName = schedule.name ? ` (${schedule.name})` : "";
+  const message = `${statusIcon} Task #${schedule.id}${displayName} ${success ? "completed" : "failed"} (${(durationMs / 1000).toFixed(1)}s):\n\n${truncatedOutput}`;
+
+  if (outputTarget === "telegram") {
+    if (notifyUser) {
+      await notifyUser(schedule.userId, message).catch(() => {});
+    }
+  } else if (outputTarget === "silent") {
+    // Log only, no notification
+    debug("task-scheduler", "silent_output", { id: schedule.id, success });
+  } else if (outputTarget.startsWith("file:")) {
+    const filePath = outputTarget.slice(5);
+    try {
+      appendFileSync(filePath, `[${new Date().toISOString()}] Task #${schedule.id}${displayName} (${success ? "ok" : "fail"}):\n${taskOutput}\n\n`);
+    } catch (err) {
+      logError("task-scheduler", "file_output_error", {
+        id: schedule.id,
+        path: filePath,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  } else if (outputTarget.startsWith("email:")) {
+    const address = outputTarget.slice(6);
+    const subject = `Schedule #${schedule.id}: ${schedule.name || schedule.task.substring(0, 50)}`;
+    const body = `${success ? "Success" : "Failed"} (${(durationMs / 1000).toFixed(1)}s)\n\n${taskOutput}`;
+    execFile(
+      "/opt/homebrew/bin/gog",
+      ["gmail", "send", "--to", address, "--subject", subject, "--body", body, "--account", process.env.GOG_ACCOUNT || address],
+      (err) => {
+        if (err) {
+          logError("task-scheduler", "email_output_error", {
+            id: schedule.id,
+            address,
+            error: err.message,
+          });
+        }
+      }
+    );
+  }
+}
+
 // --- Task execution wrapper ---
 
 async function runScheduledTask(schedule: Schedule): Promise<void> {
   const startTime = Date.now();
+  const outputTarget = schedule.output ?? "telegram";
+  const displayName = schedule.name ? ` (${schedule.name})` : "";
 
   info("task-scheduler", "task_starting", {
     id: schedule.id,
+    jobType: schedule.jobType ?? "prompt",
     task: schedule.task.substring(0, 80),
   });
 
-  // Notify user that task is starting
-  if (notifyUser) {
+  // Notify user that task is starting (unless silent)
+  if (notifyUser && outputTarget !== "silent") {
     await notifyUser(
       schedule.userId,
-      `\u23F3 Scheduled task #${schedule.id} starting: ${schedule.task}`
+      `\u23F3 Scheduled task #${schedule.id}${displayName} starting: ${schedule.task}`
     ).catch(() => {});
   }
 
   try {
-    const { output, success } = await executeClaudeTask(schedule.task);
+    // Dispatch based on jobType
+    let result: { output: string; success: boolean };
+    const jobType = schedule.jobType ?? "prompt";
+    switch (jobType) {
+      case "shell":
+        result = await executeShellTask(schedule.task);
+        break;
+      case "script":
+        result = await executeScriptTask(schedule.task);
+        break;
+      case "prompt":
+      default:
+        result = await executeClaudeTask(schedule.task);
+        break;
+    }
+
+    const { output, success } = result;
     const duration = Date.now() - startTime;
 
     // Record history
@@ -281,17 +404,8 @@ async function runScheduledTask(schedule: Schedule): Promise<void> {
       success,
     });
 
-    // Notify user with result
-    if (notifyUser) {
-      const statusIcon = success ? "\u2705" : "\u274C";
-      const truncatedOutput = output.length > 1500
-        ? output.substring(0, 1500) + "... (truncated)"
-        : output;
-      await notifyUser(
-        schedule.userId,
-        `${statusIcon} Task #${schedule.id} ${success ? "completed" : "failed"} (${(duration / 1000).toFixed(1)}s):\n\n${truncatedOutput}`
-      ).catch(() => {});
-    }
+    // Route output
+    await routeOutput(schedule, output, success, duration);
   } catch (err) {
     const duration = Date.now() - startTime;
     const errorMsg = err instanceof Error ? err.message : String(err);
@@ -325,7 +439,7 @@ async function runScheduledTask(schedule: Schedule): Promise<void> {
     if (notifyUser) {
       await notifyUser(
         schedule.userId,
-        `\u274C Task #${schedule.id} failed: ${errorMsg}`
+        `\u274C Task #${schedule.id}${displayName} failed: ${errorMsg}`
       ).catch(() => {});
     }
   }
@@ -432,200 +546,6 @@ export function setTaskNotifier(
 }
 
 /**
- * Parse user input and create a schedule.
- * Returns the created schedule or an error message.
- */
-export function createSchedule(
-  input: string,
-  userId: string
-): { schedule: Schedule } | { error: string } {
-  const trimmed = input.trim();
-  if (!trimmed) {
-    return { error: "Usage: /schedule <time|cron> <task>" };
-  }
-
-  // Try to detect if this is a cron expression or a time specification.
-  // Cron expressions have 5 fields (minute, hour, day-of-month, month, day-of-week)
-  // separated by spaces, containing digits, *, /, -, commas.
-
-  const store = loadSchedules();
-  const id = store.nextId++;
-
-  // Try parsing as a cron expression: first 5 space-separated tokens that look like cron fields
-  const cronResult = parseCronInput(trimmed);
-  if (cronResult) {
-    const schedule: Schedule = {
-      id,
-      type: "cron",
-      cronExpression: cronResult.expression,
-      task: cronResult.task,
-      status: "active",
-      createdAt: new Date().toISOString(),
-      userId,
-      history: [],
-    };
-
-    store.schedules.push(schedule);
-    saveSchedules(store);
-    scheduleCronTask(schedule);
-
-    return { schedule };
-  }
-
-  // Try parsing as a one-time schedule
-  const onceResult = parseOnceInput(trimmed);
-  if (onceResult) {
-    const schedule: Schedule = {
-      id,
-      type: "once",
-      scheduledTime: onceResult.time.toISOString(),
-      task: onceResult.task,
-      status: "active",
-      createdAt: new Date().toISOString(),
-      nextRun: onceResult.time.toISOString(),
-      userId,
-      history: [],
-    };
-
-    store.schedules.push(schedule);
-    saveSchedules(store);
-    scheduleOnceTask(schedule);
-
-    return { schedule };
-  }
-
-  // Couldn't parse - revert nextId
-  store.nextId--;
-  return {
-    error:
-      "Couldn't parse schedule. Examples:\n" +
-      "  /schedule 14:30 check disk space\n" +
-      "  /schedule 2025-03-01 09:00 run backups\n" +
-      "  /schedule */5 * * * * check health\n" +
-      "  /schedule 0 9 * * 1-5 morning briefing",
-  };
-}
-
-/**
- * Parse a cron expression + task from input.
- * Cron has exactly 5 fields at the start.
- */
-function parseCronInput(
-  input: string
-): { expression: string; task: string } | null {
-  const parts = input.split(/\s+/);
-  if (parts.length < 6) return null; // 5 cron fields + at least 1 word of task
-
-  const cronFields = parts.slice(0, 5).join(" ");
-  const task = parts.slice(5).join(" ");
-
-  // Validate cron expression
-  if (!cron.validate(cronFields)) return null;
-
-  return { expression: cronFields, task };
-}
-
-/**
- * Parse a one-time schedule from input.
- * Supports:
- *   HH:MM <task>          -> today (or tomorrow if past)
- *   YYYY-MM-DD HH:MM <task>  -> specific date+time
- */
-function parseOnceInput(
-  input: string
-): { time: Date; task: string } | null {
-  const parts = input.split(/\s+/);
-  if (parts.length < 2) return null;
-
-  // Try YYYY-MM-DD HH:MM <task>
-  const dateMatch = parts[0].match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  const timeMatch = (parts[1] || "").match(/^(\d{1,2}):(\d{2})$/);
-
-  if (dateMatch && timeMatch) {
-    const task = parts.slice(2).join(" ");
-    if (!task) return null;
-
-    const [, year, month, day] = dateMatch;
-    const [, hours, minutes] = timeMatch;
-
-    // Create date in Europe/Berlin
-    const targetDate = getBerlinDate(
-      parseInt(year, 10),
-      parseInt(month, 10) - 1,
-      parseInt(day, 10),
-      parseInt(hours, 10),
-      parseInt(minutes, 10)
-    );
-
-    return { time: targetDate, task };
-  }
-
-  // Try HH:MM <task>
-  const simpleTimeMatch = parts[0].match(/^(\d{1,2}):(\d{2})$/);
-  if (simpleTimeMatch) {
-    const task = parts.slice(1).join(" ");
-    if (!task) return null;
-
-    const hours = parseInt(simpleTimeMatch[1], 10);
-    const minutes = parseInt(simpleTimeMatch[2], 10);
-
-    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
-
-    // Get current time in Berlin
-    const now = new Date();
-    const berlinNow = new Date(
-      now.toLocaleString("en-US", { timeZone: TIMEZONE })
-    );
-
-    let targetDate = getBerlinDate(
-      berlinNow.getFullYear(),
-      berlinNow.getMonth(),
-      berlinNow.getDate(),
-      hours,
-      minutes
-    );
-
-    // If the time has passed today, schedule for tomorrow
-    if (targetDate.getTime() <= Date.now()) {
-      targetDate = getBerlinDate(
-        berlinNow.getFullYear(),
-        berlinNow.getMonth(),
-        berlinNow.getDate() + 1,
-        hours,
-        minutes
-      );
-    }
-
-    return { time: targetDate, task };
-  }
-
-  return null;
-}
-
-/**
- * Create a Date object for a specific time in Europe/Berlin timezone.
- */
-function getBerlinDate(
-  year: number,
-  month: number,
-  day: number,
-  hours: number,
-  minutes: number
-): Date {
-  // Create a date string and parse it in the Berlin timezone
-  const pad = (n: number) => n.toString().padStart(2, "0");
-  const dateStr = `${year}-${pad(month + 1)}-${pad(day)}T${pad(hours)}:${pad(minutes)}:00`;
-
-  // Use Intl to find the UTC offset for Berlin at that time
-  const tempDate = new Date(dateStr + "Z"); // treat as UTC first
-  const berlinStr = tempDate.toLocaleString("en-US", { timeZone: TIMEZONE });
-  const berlinDate = new Date(berlinStr);
-  const offsetMs = tempDate.getTime() - berlinDate.getTime();
-
-  return new Date(tempDate.getTime() + offsetMs);
-}
-
-/**
  * Cancel a schedule by ID.
  */
 export function cancelSchedule(
@@ -724,7 +644,18 @@ export function formatSchedule(schedule: Schedule): string {
     timeInfo = `at ${time}`;
   }
 
-  let lines = `${statusIcon} #${schedule.id} ${typeIcon} ${timeInfo}\n  ${schedule.task}`;
+  const nameStr = schedule.name ? ` "${schedule.name}"` : "";
+  let lines = `${statusIcon} #${schedule.id}${nameStr} ${typeIcon} ${timeInfo}\n  ${schedule.task}`;
+
+  // Show non-default jobType and output
+  const jobType = schedule.jobType ?? "prompt";
+  const outputTarget = schedule.output ?? "telegram";
+  const extras: string[] = [];
+  if (jobType !== "prompt") extras.push(`job: ${jobType}`);
+  if (outputTarget !== "telegram") extras.push(`output: ${outputTarget}`);
+  if (extras.length > 0) {
+    lines += `\n  [${extras.join(", ")}]`;
+  }
 
   if (schedule.lastRun) {
     const lastRunStr = new Date(schedule.lastRun).toLocaleString("en-GB", {
@@ -775,6 +706,33 @@ export function formatHistory(schedule: Schedule, limit: number = 10): string {
 }
 
 /**
+ * Reload schedules from disk. Stops all active jobs/timers and re-registers active schedules.
+ * Useful for hot-reloading after external schedule file changes (e.g. via SIGUSR2).
+ */
+export function reloadSchedules(): void {
+  // Stop all active cron jobs and timers
+  for (const [, job] of activeCronJobs) job.stop();
+  activeCronJobs.clear();
+  for (const [, timer] of activeTimers) clearTimeout(timer);
+  activeTimers.clear();
+
+  // Re-read from disk and resume active schedules
+  const store = loadSchedules();
+  let resumed = 0;
+  for (const schedule of store.schedules) {
+    if (schedule.status !== "active") continue;
+    if (schedule.type === "cron") {
+      scheduleCronTask(schedule);
+      resumed++;
+    } else if (schedule.type === "once") {
+      scheduleOnceTask(schedule);
+      resumed++;
+    }
+  }
+  info("task-scheduler", "reloaded", { activeResumed: resumed });
+}
+
+/**
  * Initialize the task scheduler: load persisted schedules, resume active ones.
  */
 export function initTaskScheduler(): void {
@@ -804,6 +762,9 @@ export function initTaskScheduler(): void {
  * Stop all scheduled tasks cleanly (called during shutdown).
  */
 export function stopTaskScheduler(): void {
+  const cronCount = activeCronJobs.size;
+  const timerCount = activeTimers.size;
+
   for (const [id, job] of activeCronJobs) {
     job.stop();
     debug("task-scheduler", "stopped_cron", { id });
@@ -817,7 +778,7 @@ export function stopTaskScheduler(): void {
   activeTimers.clear();
 
   info("task-scheduler", "stopped", {
-    cronJobs: activeCronJobs.size,
-    timers: activeTimers.size,
+    cronJobs: cronCount,
+    timers: timerCount,
   });
 }

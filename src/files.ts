@@ -90,7 +90,8 @@ function ensureSessionDir(sessionId: string): string {
 }
 
 /**
- * Download a file from Telegram API to local temp directory
+ * Download a file from Telegram API to local temp directory.
+ * Handles redirects, timeouts, and cleans up on failure.
  */
 export async function downloadTelegramFile(
   botToken: string,
@@ -101,78 +102,87 @@ export async function downloadTelegramFile(
   const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
   const sessionDir = ensureSessionDir(sessionId);
 
-  // Sanitize filename
-  const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+  // Sanitize filename - more aggressive: limit length too
+  const safeFilename = filename
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .substring(0, 200);
   const uniquePrefix = Date.now().toString(36) + "_";
   const localPath = path.join(sessionDir, uniquePrefix + safeFilename);
 
+  return downloadFileFromUrl(fileUrl, localPath);
+}
+
+/**
+ * Helper to download from URL to local path with redirect support.
+ */
+async function downloadFileFromUrl(
+  url: string,
+  localPath: string,
+  maxRedirects: number = 3
+): Promise<string> {
+  if (maxRedirects <= 0) {
+    throw new Error("Too many redirects during Telegram file download");
+  }
+
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(localPath);
+    let settled = false;
 
-    https
-      .get(fileUrl, (response) => {
-        // Handle redirects
-        if (response.statusCode === 301 || response.statusCode === 302) {
-          const redirectUrl = response.headers.location;
-          if (redirectUrl) {
-            file.close();
-            fs.unlinkSync(localPath);
-            // Recursively follow redirect
-            https
-              .get(redirectUrl, (redirectResponse) => {
-                if (redirectResponse.statusCode !== 200) {
-                  file.close();
-                  if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
-                  reject(
-                    new Error(
-                      `Download failed with status ${redirectResponse.statusCode}`
-                    )
-                  );
-                  return;
-                }
-                const redirectFile = fs.createWriteStream(localPath);
-                redirectResponse.pipe(redirectFile);
-                redirectFile.on("finish", () => {
-                  redirectFile.close();
-                  resolve(localPath);
-                });
-                redirectFile.on("error", (err) => {
-                  if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
-                  reject(err);
-                });
-              })
-              .on("error", (err) => {
-                if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
-                reject(err);
-              });
-            return;
-          }
-        }
+    const cleanup = () => {
+      try {
+        if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
+      } catch { /* ignore */ }
+    };
 
-        if (response.statusCode !== 200) {
-          file.close();
-          if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
-          reject(
-            new Error(`Download failed with status ${response.statusCode}`)
-          );
+    const settle = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (err) {
+        file.close(() => cleanup());
+        reject(err);
+      }
+    };
+
+    const req = https.get(url, { timeout: 60000 }, (response) => {
+      // Handle redirects
+      if (response.statusCode === 301 || response.statusCode === 302) {
+        const redirectUrl = response.headers.location;
+        if (redirectUrl) {
+          response.resume();
+          file.close(() => {
+            cleanup();
+            downloadFileFromUrl(redirectUrl, localPath, maxRedirects - 1)
+              .then(resolve)
+              .catch(reject);
+          });
           return;
         }
+      }
 
-        response.pipe(file);
-        file.on("finish", () => {
-          file.close();
-          resolve(localPath);
+      if (response.statusCode !== 200) {
+        response.resume();
+        settle(new Error(`Download failed with status ${response.statusCode}`));
+        return;
+      }
+
+      response.pipe(file);
+      file.on("finish", () => {
+        file.close(() => {
+          if (!settled) {
+            settled = true;
+            resolve(localPath);
+          }
         });
-        file.on("error", (err) => {
-          if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
-          reject(err);
-        });
-      })
-      .on("error", (err) => {
-        file.close();
-        if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
-        reject(err);
       });
+      file.on("error", (err) => settle(err));
+      response.on("error", (err) => settle(err));
+    });
+
+    req.on("error", (err) => settle(err));
+    req.on("timeout", () => {
+      req.destroy();
+      settle(new Error("Telegram file download timed out after 60 seconds"));
+    });
   });
 }
 

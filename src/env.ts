@@ -40,9 +40,6 @@ export const env = {
   // Files
   TG_MEMORY_FILE: process.env.TG_MEMORY_FILE || join(HOME, ".claude", "memory.md"),
   TG_ALLOWLIST_FILE: process.env.TG_ALLOWLIST_FILE || join(HOME, ".claude", "telegram-allowlist.json"),
-  TG_TODOS_FILE: process.env.TG_TODOS_FILE || join(HOME, ".claude", "telegram-todos.json"),
-  TG_NOTES_FILE: process.env.TG_NOTES_FILE || join(HOME, ".claude", "telegram-notes.json"),
-  TG_REMINDERS_FILE: process.env.TG_REMINDERS_FILE || join(HOME, ".claude", "telegram-reminders.json"),
   TG_PID_FILE: process.env.TG_PID_FILE || join(PROJECT_DIR, "gateway.pid"),
   TG_MCP_CONFIG: process.env.TG_MCP_CONFIG || join(PROJECT_DIR, "mcp-config.json"),
   TG_GATEWAY_CONFIG: process.env.TG_GATEWAY_CONFIG || join(PROJECT_DIR, "config", "gateway.json"),

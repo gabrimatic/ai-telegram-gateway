@@ -10,56 +10,11 @@ import { incrementMessages, incrementErrors } from "./health";
 import { recordSuccess, recordFailure } from "./metrics";
 import { buildSystemPrompt, wrapWithSystemPrompt, SessionContext } from "./system-prompt";
 import { loadMemoryContext } from "./memory";
-import { getConfiguredProviderName, getProviderDisplayName, getProviderProcessConfig } from "./provider";
+import { getConfiguredProviderName, getProviderProcessConfig } from "./provider";
 import { ICONS } from "./constants";
-import { loadTodos, saveTodos, loadNotes, saveNotes } from "./storage";
-import { formatDuration, formatUptime, escapeMarkdown, safeExec } from "./utils";
-import { activeTimers } from "./commands";
+import { formatDuration, formatUptime, safeExec } from "./utils";
+import { loadSchedules, saveSchedules, reloadSchedules } from "./task-scheduler";
 import { env } from "./env";
-
-export async function handleTodoCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
-  try {
-    const action = ctx.callbackQuery.data.replace("todo_", "");
-    const todos = loadTodos();
-
-    switch (action) {
-      case "add": {
-        await ctx.editMessageText("Reply to this message with your todo text.\n\nOr use: /todo add [text]");
-        break;
-      }
-      case "list": {
-        const pending = todos.items.filter((t) => !t.done);
-        if (pending.length === 0) {
-          await ctx.editMessageText("\uD83D\uDCCB No pending todos. Use /todo add [text] to add one.");
-        } else {
-          const list = pending.map((t) => `\u2610 #${t.id} ${escapeMarkdown(t.text)}`).join("\n");
-          await ctx.editMessageText(`\uD83D\uDCCB *Pending Todos*\n\n${list}`, { parse_mode: "Markdown" });
-        }
-        break;
-      }
-      case "clear": {
-        const pendingCount = todos.items.filter((t) => !t.done).length;
-        if (pendingCount === 0) {
-          await ctx.editMessageText("\uD83D\uDCCB No todos to clear.");
-        } else {
-          const keyboard = new InlineKeyboard()
-            .text("\u2705 Yes, clear", "todo_confirm_clear")
-            .text("\u274C Cancel", "todo_cancel_clear");
-          await ctx.editMessageText(
-            `\u26A0\uFE0F *Clear ${pendingCount} todo${pendingCount > 1 ? "s" : ""}?*\nThis cannot be undone.`,
-            { parse_mode: "Markdown", reply_markup: keyboard }
-          );
-        }
-        break;
-      }
-    }
-  } catch (err) {
-    error("callbacks", "todo_callback_failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-  await ctx.answerCallbackQuery();
-}
 
 export async function handleTimerCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
   try {
@@ -67,72 +22,32 @@ export async function handleTimerCallback(ctx: CallbackQueryContext<Context>): P
     if (!match) return;
     const seconds = parseInt(match[1], 10);
     const userId = ctx.from?.id?.toString();
+    if (!userId) return;
 
-    if (activeTimers.size >= 20) {
-      await ctx.answerCallbackQuery("Too many active timers!");
-      return;
-    }
+    const triggerAt = new Date(Date.now() + seconds * 1000).toISOString();
+    const label = `Timer ${formatDuration(seconds)}`;
+    const store = loadSchedules();
+    const id = store.nextId++;
+    store.schedules.push({
+      id,
+      type: "once",
+      jobType: "shell",
+      task: `echo "${label} done!"`,
+      output: "telegram",
+      name: label,
+      status: "active",
+      createdAt: new Date().toISOString(),
+      scheduledTime: triggerAt,
+      nextRun: triggerAt,
+      userId,
+      history: [],
+    });
+    saveSchedules(store);
+    reloadSchedules();
 
-    const timerId = `${userId}-${Date.now()}`;
-    await ctx.editMessageText(`\u23F1\uFE0F Timer: *${formatDuration(seconds)}*`, { parse_mode: "Markdown" });
-
-    const timer = setTimeout(async () => {
-      try {
-        await ctx.reply(`\u23F1\uFE0F\u2705 *Time's up!*`, { parse_mode: "Markdown" });
-      } catch {
-        // User may have blocked bot or chat unavailable
-      }
-      activeTimers.delete(timerId);
-    }, seconds * 1000);
-
-    activeTimers.set(timerId, timer);
+    await ctx.editMessageText(`\u23F1\uFE0F Timer: *${formatDuration(seconds)}* (schedule #${id})`, { parse_mode: "Markdown" });
   } catch (err) {
     error("callbacks", "timer_callback_failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-  await ctx.answerCallbackQuery();
-}
-
-export async function handleRandomCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
-  try {
-    const match = ctx.callbackQuery.data.match(/^random_(\d+)_(\d+)$/);
-    if (!match) return;
-    const min = parseInt(match[1], 10);
-    const max = parseInt(match[2], 10);
-    const result = Math.floor(Math.random() * (max - min + 1)) + min;
-
-    await ctx.editMessageText(`\uD83D\uDD22 *Random (${min}-${max}):* ${result}`, { parse_mode: "Markdown" });
-  } catch (err) {
-    error("callbacks", "random_callback_failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-  await ctx.answerCallbackQuery();
-}
-
-export async function handleTimeCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
-  try {
-    const timezone = ctx.callbackQuery.data.replace("time_", "");
-    try {
-      const now = new Date();
-      const timeStr = now.toLocaleString("en-GB", {
-        timeZone: timezone,
-        weekday: "long",
-        year: "numeric",
-        month: "long",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        timeZoneName: "short",
-      });
-      await ctx.editMessageText(`\uD83D\uDD50 Time in ${timezone}:\n${timeStr}`);
-    } catch {
-      await ctx.editMessageText(`${ICONS.error} Invalid timezone: ${timezone}`);
-    }
-  } catch (err) {
-    error("callbacks", "time_callback_failed", {
       error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -194,64 +109,33 @@ export async function handleTranslateCallback(ctx: CallbackQueryContext<Context>
   await ctx.answerCallbackQuery();
 }
 
-export async function handleCalcCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
-  try {
-    await ctx.editMessageText("Calculator cleared. Use /calc [expression]");
-  } catch (err) {
-    error("callbacks", "calc_callback_failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-  await ctx.answerCallbackQuery();
-}
-
 export async function handleHelpCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
   try {
-    const providerName = getProviderDisplayName();
     const helpText = `\uD83E\uDD16 *Bot Commands*
 
 \uD83D\uDCCB *PRODUCTIVITY*
-/todo - Manage tasks
-/note /notes - Quick notes
-/remind - Reminders
-/timer - Countdown
-/schedule /schedules - Task scheduler
-/snippet /snippets - Command bookmarks
+/schedule - Scheduled tasks
+/timer - Quick countdown
 
-\uD83D\uDD27 *UTILITIES*
-/calc - Calculator
-/random /pick
-/uuid /time /date
-
-\uD83C\uDF10 *INFO* _(${providerName}-powered)_
+\uD83C\uDF10 *INFO*
 /weather /define /translate
 
 \uD83D\uDCBB *SYSTEM & SESSION*
-/model - Switch AI model
-/tts - Toggle voice output
-/clear - Fresh start
-/session /context
-/disk /memory /cpu /battery
+/model /tts /clear
+/session - Session status & management
+/disk /memory /cpu /battery /temp
 
 \uD83D\uDDA5 *SERVER*
-/sys /docker /pm2 /brew /git
-/kill /ports /net /ps /df /top /temp
-/reboot /sleep /screenshot
+/pm2 /git /net /sh
+/ps /kill /top /reboot
 
-\uD83D\uDCE6 *SHELL & FILES*
-/sh /shlong - Shell access
-/ls /pwd /cat /find /size /tree /upload
-
-\uD83C\uDF10 *NETWORK*
-/ping /dns /curl
-
-\uD83D\uDD14 *NOTIFICATIONS*
-/quiet /dnd
+\uD83D\uDCC1 *FILES*
+/cd /ls /pwd /cat /find /size
 
 \uD83D\uDCC8 *MONITORING*
 /health /analytics /errors
 
-\u2139\uFE0F /help /stats /id /version /uptime`;
+\u2139\uFE0F /help /stats /id /version /uptime /ping`;
     await ctx.editMessageText(helpText, { parse_mode: "Markdown" });
   } catch (err) {
     error("callbacks", "help_callback_failed", {
@@ -291,82 +175,6 @@ export async function handleTimerMenuCallback(ctx: CallbackQueryContext<Context>
     await ctx.editMessageText("\u23F1\uFE0F Pick duration:", { reply_markup: keyboard });
   } catch (err) {
     error("callbacks", "timer_menu_callback_failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-  await ctx.answerCallbackQuery();
-}
-
-export async function handleNotesListCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
-  try {
-    const notes = loadNotes();
-    const recent = notes.items.slice(-10).reverse();
-    if (recent.length === 0) {
-      await ctx.editMessageText("\uD83D\uDCCC No notes yet. Use /note [text] to save one.");
-    } else {
-      const list = recent.map((n) => {
-        const date = new Date(n.createdAt);
-        const timeStr = date.toLocaleString("en-GB", { timeZone: "Europe/Berlin" });
-        return `#${n.id} \\[${timeStr}\\]\n${escapeMarkdown(n.text)}`;
-      }).join("\n\n");
-      await ctx.editMessageText(`\uD83D\uDCCC *Recent Notes*\n\n${list}`, { parse_mode: "Markdown" });
-    }
-  } catch (err) {
-    error("callbacks", "notes_list_callback_failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-  await ctx.answerCallbackQuery();
-}
-
-export async function handleTodoConfirmClearCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
-  try {
-    const todos = loadTodos();
-    const count = todos.items.filter((t) => !t.done).length;
-    todos.items = [];
-    todos.nextId = 1;
-    saveTodos(todos);
-    await ctx.editMessageText(`${ICONS.clear} Cleared ${count} todo${count !== 1 ? "s" : ""}.`);
-  } catch (err) {
-    error("callbacks", "todo_confirm_clear_callback_failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-  await ctx.answerCallbackQuery();
-}
-
-export async function handleTodoCancelClearCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
-  try {
-    await ctx.editMessageText("\u274C Cancelled.");
-  } catch (err) {
-    error("callbacks", "todo_cancel_clear_callback_failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-  await ctx.answerCallbackQuery();
-}
-
-export async function handleNotesConfirmClearCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
-  try {
-    const notes = loadNotes();
-    const count = notes.items.length;
-    notes.items = [];
-    notes.nextId = 1;
-    saveNotes(notes);
-    await ctx.editMessageText(`${ICONS.clear} Cleared ${count} note${count !== 1 ? "s" : ""}.`);
-  } catch (err) {
-    error("callbacks", "notes_confirm_clear_callback_failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-  await ctx.answerCallbackQuery();
-}
-
-export async function handleNotesCancelClearCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
-  try {
-    await ctx.editMessageText("\u274C Cancelled.");
-  } catch (err) {
-    error("callbacks", "notes_cancel_clear_callback_failed", {
       error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -495,33 +303,3 @@ export async function handleRebootCancelCallback(ctx: CallbackQueryContext<Conte
   await ctx.answerCallbackQuery();
 }
 
-export async function handleSleepConfirmCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
-  try {
-    if (!env.TG_ENABLE_DANGEROUS_COMMANDS) {
-      await ctx.editMessageText(`${ICONS.warning} This operation is disabled by configuration.`);
-      await ctx.answerCallbackQuery("Disabled");
-      return;
-    }
-    await ctx.editMessageText("Putting host machine to sleep...");
-    await ctx.answerCallbackQuery("Sleeping...");
-    setTimeout(() => {
-      safeExec("pmset sleepnow 2>/dev/null || osascript -e 'tell app \"System Events\" to sleep'");
-    }, 2000);
-  } catch (err) {
-    error("callbacks", "sleep_confirm_failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    await ctx.answerCallbackQuery();
-  }
-}
-
-export async function handleSleepCancelCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
-  try {
-    await ctx.editMessageText("\u{274C} Sleep cancelled.");
-  } catch (err) {
-    error("callbacks", "sleep_cancel_failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-  await ctx.answerCallbackQuery();
-}

@@ -17,8 +17,8 @@ import {
 } from "./service-manager";
 import { setBotInstance } from "./alerting";
 import { getConfiguredProviderName, getProviderProcessConfig } from "./provider";
-import { initTaskScheduler, stopTaskScheduler, setTaskNotifier } from "./task-scheduler";
-import { initAnalytics } from "./analytics";
+import { initTaskScheduler, stopTaskScheduler, setTaskNotifier, reloadSchedules } from "./task-scheduler";
+import { initAnalytics, stopAnalytics } from "./analytics";
 import { startWatchdog, stopWatchdog } from "./watchdog";
 import { checkPostDeployHealth, checkRollbackNeeded } from "./deployer";
 
@@ -234,6 +234,7 @@ async function main(): Promise<void> {
     stopTaskScheduler();
     stopScheduler();
     stopHealthMonitor();
+    stopAnalytics();
     stopLogMaintenance();
     stopSession();
     stopServiceHealthMonitor();
@@ -260,20 +261,30 @@ async function main(): Promise<void> {
     });
   });
 
+  process.on("SIGUSR2", () => {
+    info("daemon", "sigusr2_reload");
+    reloadSchedules();
+  });
+
   // Handle uncaught errors
   process.on("uncaughtException", (err) => {
     error("daemon", "uncaught_exception", {
       error: err.message,
-      stack: err.stack,
+      stack: err.stack?.split("\n").slice(0, 10).join("\n"),
     });
-    // Allow log flush, then exit so launchd can restart
-    setTimeout(() => process.exit(1), 100);
+    // Clean up PID file before exit
+    cleanupPidFile();
+    // Allow log flush, then exit so PM2 can restart
+    setTimeout(() => process.exit(1), 200);
   });
 
   process.on("unhandledRejection", (reason) => {
     error("daemon", "unhandled_rejection", {
       reason: reason instanceof Error ? reason.message : String(reason),
+      stack: reason instanceof Error ? reason.stack?.split("\n").slice(0, 5).join("\n") : undefined,
     });
+    // Don't exit on unhandled rejections - just log them
+    // The specific subsystems have their own error recovery
   });
 
   try {

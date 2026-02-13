@@ -76,15 +76,22 @@ function logRecovery(trigger: string, action: string, success: boolean, details?
 // --- Error pattern detection ---
 
 export function recordError(errorType: string, message: string): void {
+  const now = Date.now();
+
   recentErrors.push({
     type: errorType,
-    timestamp: Date.now(),
-    message,
+    timestamp: now,
+    message: message.substring(0, 500), // Cap message length
   });
 
-  // Trim old entries
+  // Trim old entries - both by count and by age for efficiency
   if (recentErrors.length > MAX_ERROR_HISTORY) {
     recentErrors.splice(0, recentErrors.length - MAX_ERROR_HISTORY);
+  }
+  // Also trim entries older than the pattern window to prevent stale data accumulation
+  const windowStart = now - ERROR_PATTERN_WINDOW_MS;
+  while (recentErrors.length > 0 && recentErrors[0].timestamp < windowStart) {
+    recentErrors.shift();
   }
 
   // Track in analytics too

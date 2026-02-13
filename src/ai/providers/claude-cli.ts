@@ -13,6 +13,23 @@ interface ContentBlock {
   text?: string;
 }
 
+interface StreamMessageUsage {
+  input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+  output_tokens?: number;
+}
+
+interface StreamMessageModelUsage {
+  [model: string]: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadInputTokens?: number;
+    cacheCreationInputTokens?: number;
+    contextWindow?: number;
+  };
+}
+
 interface StreamMessage {
   type: string;
   content?: string;
@@ -20,6 +37,8 @@ interface StreamMessage {
     content?: ContentBlock[] | string;
   };
   result?: string;
+  usage?: StreamMessageUsage;
+  modelUsage?: StreamMessageModelUsage;
 }
 
 export type SessionStats = AIStats;
@@ -50,6 +69,9 @@ class ClaudeSession extends EventEmitter {
   private lastActivityTime: number = Date.now();
   private healthCheckTimer: NodeJS.Timeout | null = null;
   private model: ModelName;
+  private totalInputTokens: number = 0;
+  private totalOutputTokens: number = 0;
+  private contextWindow: number = 200000;
 
   constructor(model: ModelName) {
     super();
@@ -107,6 +129,7 @@ class ClaudeSession extends EventEmitter {
       claudePath,
       [
         "--print",
+        "--verbose",
         "--dangerously-skip-permissions",
         "--input-format",
         "stream-json",
@@ -136,14 +159,23 @@ class ClaudeSession extends EventEmitter {
       });
     });
 
+    // Handle readline errors (e.g., stream destroyed unexpectedly)
+    this.rl.on("error", (err) => {
+      logError("claude", "readline_error", {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: this.sessionId,
+      });
+    });
+
     this.proc.stderr?.on("data", (data) => {
       const msg = data.toString().trim();
       if (msg) {
-        debug("claude", "stderr", { message: msg });
+        // Only log first 500 chars of stderr to prevent log flooding
+        debug("claude", "stderr", { message: msg.substring(0, 500) });
         // Capture MCP-related errors (capped to prevent unbounded growth)
         if (/mcp|tool|connection|refused|ECONNREFUSED/i.test(msg)) {
           if (this.currentMcpErrors.length < 50) {
-            this.currentMcpErrors.push(msg);
+            this.currentMcpErrors.push(msg.substring(0, 200));
           }
         }
       }
@@ -253,6 +285,22 @@ class ClaudeSession extends EventEmitter {
 
       // Result message indicates completion
       if (msg.type === "result") {
+        // Capture token usage
+        if (msg.usage) {
+          this.totalInputTokens = (msg.usage.input_tokens || 0) +
+            (msg.usage.cache_creation_input_tokens || 0) +
+            (msg.usage.cache_read_input_tokens || 0);
+          this.totalOutputTokens = msg.usage.output_tokens || 0;
+        }
+        if (msg.modelUsage) {
+          for (const modelInfo of Object.values(msg.modelUsage)) {
+            if (modelInfo.contextWindow) {
+              this.contextWindow = modelInfo.contextWindow;
+              break;
+            }
+          }
+        }
+
         const finalResponse = msg.result || this.responseBuffer;
         const durationMs = Date.now() - this.requestStartTime;
         if (this.currentResolve) {
@@ -464,6 +512,9 @@ class ClaudeSession extends EventEmitter {
       isHealthy,
       lastActivityMs: timeSinceActivity,
       model: this.model,
+      totalInputTokens: this.totalInputTokens,
+      totalOutputTokens: this.totalOutputTokens,
+      contextWindow: this.contextWindow,
     };
   }
 

@@ -29,6 +29,49 @@ let config: LoggerConfig = {
 let logDirEnsured = false;
 let logCleanupInterval: NodeJS.Timeout | null = null;
 
+// Write buffer to reduce disk I/O - flush periodically or when buffer is large
+const writeBuffers: Map<string, string[]> = new Map();
+const FLUSH_INTERVAL_MS = 2000;
+const MAX_BUFFER_LINES = 50;
+let flushInterval: NodeJS.Timeout | null = null;
+
+function getOrCreateBuffer(path: string): string[] {
+  let buf = writeBuffers.get(path);
+  if (!buf) {
+    buf = [];
+    writeBuffers.set(path, buf);
+  }
+  return buf;
+}
+
+function flushAllBuffers(): void {
+  for (const [path, lines] of writeBuffers.entries()) {
+    if (lines.length === 0) continue;
+    try {
+      ensureLogDir();
+      appendFileSync(path, lines.join("\n") + "\n");
+    } catch {
+      // Silently ignore write errors during flush
+    }
+    lines.length = 0;
+  }
+}
+
+function startFlushTimer(): void {
+  if (flushInterval) return;
+  flushInterval = setInterval(flushAllBuffers, FLUSH_INTERVAL_MS);
+  flushInterval.unref();
+}
+
+function stopFlushTimer(): void {
+  if (flushInterval) {
+    clearInterval(flushInterval);
+    flushInterval = null;
+  }
+  // Final flush
+  flushAllBuffers();
+}
+
 function ensureLogDir(): void {
   if (logDirEnsured) return;
   if (!existsSync(LOG_DIR)) {
@@ -50,8 +93,18 @@ function formatEntry(entry: LogEntry): string {
 }
 
 function writeToFile(path: string, entry: LogEntry): void {
-  ensureLogDir();
-  appendFileSync(path, formatEntry(entry) + "\n");
+  const buf = getOrCreateBuffer(path);
+  buf.push(formatEntry(entry));
+  // Flush immediately if buffer is large (prevents memory buildup during bursts)
+  if (buf.length >= MAX_BUFFER_LINES) {
+    try {
+      ensureLogDir();
+      appendFileSync(path, buf.join("\n") + "\n");
+      buf.length = 0;
+    } catch {
+      // Silently ignore write errors
+    }
+  }
 }
 
 function cleanOldLogs(): void {
@@ -78,6 +131,7 @@ export function initLogger(loggerConfig: LoggerConfig): void {
   config = loggerConfig;
   ensureLogDir();
   cleanOldLogs();
+  startFlushTimer();
 }
 
 export function startLogMaintenance(): void {
@@ -94,6 +148,7 @@ export function stopLogMaintenance(): void {
   }
   clearInterval(logCleanupInterval);
   logCleanupInterval = null;
+  stopFlushTimer();
 }
 
 export function log(

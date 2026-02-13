@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, appendFileSync, renameSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, appendFileSync, renameSync, mkdirSync } from "fs";
 import { dirname, join } from "path";
 import { getConfig } from "./config";
 import { getProviderDisplayName } from "./provider";
@@ -23,6 +23,11 @@ function getDateTimeString(): string {
 function ensureMemoryFile(): void {
   const config = getConfig();
   if (!existsSync(config.memoryPath)) {
+    // Ensure parent directory exists
+    const dir = dirname(config.memoryPath);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
     writeFileSync(config.memoryPath, `# ${getProviderDisplayName()} Memory\n\n`);
   }
 }

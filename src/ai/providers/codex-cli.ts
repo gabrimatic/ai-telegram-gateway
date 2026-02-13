@@ -224,7 +224,12 @@ async function executeCodex(
     proc.stderr?.on("data", (data) => {
       const msg = data.toString().trim();
       if (msg) {
-        debug("codex", "stderr", { message: msg.substring(0, 200) });
+        // Only log first 500 chars to prevent log flooding
+        debug("codex", "stderr", { message: msg.substring(0, 500) });
+        // Capture error messages for diagnostics
+        if (!errorMessage && (msg.includes("Error") || msg.includes("error"))) {
+          errorMessage = msg.substring(0, 500);
+        }
       }
     });
 

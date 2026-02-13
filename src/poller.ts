@@ -38,16 +38,18 @@ function getFallbackStuckMessage(): string {
 
 /**
  * Generate a unique request ID for tracing
- * Format: req-{timestamp}-{random4chars}
+ * Format: req-{timestamp}-{random6chars}
  */
+let requestCounter = 0;
 function generateRequestId(): string {
   const timestamp = Date.now();
+  const count = (requestCounter++).toString(36);
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
   let random = "";
   for (let i = 0; i < 4; i++) {
     random += chars.charAt(Math.floor(Math.random() * chars.length));
   }
-  return `req-${timestamp}-${random}`;
+  return `req-${timestamp}-${count}${random}`;
 }
 import {
   loadAllowlist,
@@ -72,27 +74,16 @@ export function getInFlightCount(): number {
 let aiProcessingCount = 0;
 
 import {
-  handleTodoCallback,
   handleTimerCallback,
-  handleRandomCallback,
-  handleTimeCallback,
   handleWeatherCallback,
   handleTranslateCallback,
-  handleCalcCallback,
   handleHelpCallback,
   handleWeatherMenuCallback,
   handleTimerMenuCallback,
-  handleNotesListCallback,
-  handleTodoConfirmClearCallback,
-  handleTodoCancelClearCallback,
-  handleNotesConfirmClearCallback,
-  handleNotesCancelClearCallback,
   handleModelCallback,
   handleSessionCallback,
   handleRebootConfirmCallback,
   handleRebootCancelCallback,
-  handleSleepConfirmCallback,
-  handleSleepCancelCallback,
 } from "./callbacks";
 
 /**
@@ -749,114 +740,36 @@ export async function createBot(
   // Grouped logically: session, productivity, utilities, info, system, files, network
   if (!skipSetMyCommands) {
     await bot.api.setMyCommands([
-    // Session commands
-    { command: "start", description: "Welcome & quick actions" },
     { command: "help", description: "Show all commands" },
-    { command: "clear", description: "Clear session and start fresh" },
-    { command: "stats", description: "Bot statistics" },
-    { command: "model", description: "Switch model (haiku/opus)" },
-    { command: "tts", description: "Toggle voice output on/off" },
-    // Productivity
-    { command: "todo", description: "Manage todo list" },
-    { command: "note", description: "Save a quick note" },
-    { command: "notes", description: "List saved notes" },
-    { command: "remind", description: "Set a reminder" },
-    { command: "timer", description: "Set a countdown timer" },
-    { command: "schedule", description: "Schedule a task (one-time or cron)" },
-    { command: "schedules", description: "List scheduled tasks" },
-    // Utilities
-    { command: "calc", description: "Calculator" },
-    { command: "random", description: "Random number generator" },
-    { command: "pick", description: "Pick from comma-separated options" },
-    { command: "uuid", description: "Generate UUID" },
-    { command: "time", description: "World clock" },
-    { command: "date", description: "Current date & week number" },
-    // Info (Claude-powered)
-    { command: "weather", description: "Weather info for a city" },
-    { command: "define", description: "Define a word" },
-    { command: "translate", description: "Translate text" },
-    // System info
+    { command: "schedule", description: "View scheduled tasks" },
+    { command: "timer", description: "Quick countdown timer" },
+    { command: "weather", description: "Weather info" },
+    { command: "model", description: "Switch AI model" },
+    { command: "tts", description: "Toggle voice output" },
+    { command: "clear", description: "Fresh session start" },
+    { command: "session", description: "Manage Claude sessions" },
     { command: "disk", description: "Disk usage" },
     { command: "memory", description: "Memory usage" },
     { command: "cpu", description: "CPU info" },
-    { command: "battery", description: "Battery status" },
-    // Files
-    { command: "ls", description: "List directory contents" },
-    { command: "pwd", description: "Current working directory" },
-    { command: "cat", description: "Read file contents" },
-    { command: "find", description: "Find files by name" },
-    { command: "size", description: "Get file/folder size" },
-    // Network
-    { command: "ping", description: "Latency check or ping a host" },
-    { command: "dns", description: "DNS lookup" },
-    { command: "curl", description: "Fetch URL headers" },
-    // Server management
-    { command: "sys", description: "Full system dashboard" },
-    { command: "docker", description: "Docker container management" },
-    { command: "pm2", description: "PM2 process manager" },
-    { command: "brew", description: "Homebrew package management" },
-    { command: "git", description: "Git repo status/log/pull" },
-    { command: "kill", description: "Kill process by PID" },
-    { command: "ports", description: "Show listening ports" },
-    { command: "net", description: "Network info (ip/speed/connections)" },
-    { command: "ps", description: "List/filter processes" },
-    { command: "df", description: "Detailed disk usage" },
-    { command: "top", description: "Top processes by CPU" },
-    { command: "temp", description: "CPU temperature" },
-    // Monitoring
-    { command: "health", description: "System health dashboard" },
-    { command: "analytics", description: "Usage statistics" },
-    { command: "errors", description: "Error analysis & patterns" },
-    // Snippets
-    { command: "snippet", description: "Save/run command snippets" },
-    { command: "snippets", description: "List saved snippets" },
-    // Shell access
+    { command: "health", description: "System health" },
     { command: "sh", description: "Execute shell command" },
-    { command: "shlong", description: "Execute long-running command" },
-    // File transfer
-    { command: "upload", description: "Download file to path (reply to file)" },
-    { command: "tree", description: "Directory tree view" },
-    // Session management
-    { command: "session", description: "Manage Claude sessions" },
-    { command: "sessions", description: "Show active sessions" },
-    { command: "context", description: "Current session context info" },
-    // Notification preferences
-    { command: "quiet", description: "Toggle quiet mode" },
-    { command: "dnd", description: "Do not disturb mode" },
-    // System shortcuts
-    { command: "reboot", description: "Reboot host machine" },
-    { command: "sleep", description: "Sleep host machine" },
-    { command: "screenshot", description: "Take and send a screenshot" },
-    { command: "deploy", description: "Deploy code changes safely" },
-    // Meta
-    { command: "id", description: "Your Telegram user ID" },
-    { command: "version", description: "Bot version" },
-    { command: "uptime", description: "Bot uptime" },
+    { command: "cd", description: "Change directory" },
+    { command: "ls", description: "List files" },
+    { command: "ping", description: "Latency check" },
     ]);
   }
 
   // Register callback query handlers
-  bot.callbackQuery(/^todo_(add|list|clear)$/, handleTodoCallback);
-  bot.callbackQuery("todo_confirm_clear", handleTodoConfirmClearCallback);
-  bot.callbackQuery("todo_cancel_clear", handleTodoCancelClearCallback);
   bot.callbackQuery(/^timer_\d+$/, handleTimerCallback);
   bot.callbackQuery("timer_menu", handleTimerMenuCallback);
-  bot.callbackQuery(/^random_\d+_\d+$/, handleRandomCallback);
-  bot.callbackQuery(/^time_.+$/, handleTimeCallback);
   bot.callbackQuery("weather_menu", handleWeatherMenuCallback);
   bot.callbackQuery(/^weather_.+$/, handleWeatherCallback);
   bot.callbackQuery(/^translate_.+$/, handleTranslateCallback);
-  bot.callbackQuery("calc_clear", handleCalcCallback);
   bot.callbackQuery("help_show", handleHelpCallback);
-  bot.callbackQuery("notes_list", handleNotesListCallback);
-  bot.callbackQuery("notes_confirm_clear", handleNotesConfirmClearCallback);
-  bot.callbackQuery("notes_cancel_clear", handleNotesCancelClearCallback);
   bot.callbackQuery(/^model_\w+$/, handleModelCallback);
   bot.callbackQuery(/^session_(status|kill|new)$/, handleSessionCallback);
   bot.callbackQuery("reboot_confirm", handleRebootConfirmCallback);
   bot.callbackQuery("reboot_cancel", handleRebootCancelCallback);
-  bot.callbackQuery("sleep_confirm", handleSleepConfirmCallback);
-  bot.callbackQuery("sleep_cancel", handleSleepCancelCallback);
 
   // Catch-all handler to prevent loading spinners on unknown callbacks
   bot.on("callback_query:data", async (ctx) => {
@@ -878,8 +791,16 @@ export async function createBot(
 
   bot.catch((err) => {
     incrementErrors();
+    const errObj = err.error || err;
+    const errMsg = errObj instanceof Error ? errObj.message : String(errObj);
+    // Don't log noisy "not modified" errors from editing messages
+    if (errMsg.includes("message is not modified")) {
+      debug("poller", "bot_error_benign", { error: errMsg });
+      return;
+    }
     error("poller", "bot_error", {
-      error: err.message || String(err),
+      error: errMsg,
+      chatId: err.ctx?.chat?.id,
     });
   });
 
@@ -905,14 +826,23 @@ export async function startPolling(bot: Bot): Promise<void> {
       break;
     } catch (err) {
       retryCount++;
+      const errMsg = err instanceof Error ? err.message : String(err);
+
+      // Check for fatal errors that shouldn't be retried
+      if (errMsg.includes("401") || errMsg.includes("Unauthorized")) {
+        error("poller", "fatal_auth_error", { error: errMsg });
+        throw new Error("Bot token is invalid or revoked. Cannot start polling.");
+      }
+
       error("poller", "start_failed", {
         attempt: retryCount,
-        error: err instanceof Error ? err.message : String(err),
+        error: errMsg,
       });
 
-      // Exponential backoff capped at maxDelay
-      const delay = Math.min(baseDelay * Math.pow(2, retryCount - 1), maxDelay);
-      info("poller", "retrying", { delayMs: delay, attempt: retryCount });
+      // Exponential backoff with jitter, capped at maxDelay
+      const jitter = Math.random() * 1000;
+      const delay = Math.min(baseDelay * Math.pow(2, retryCount - 1) + jitter, maxDelay);
+      info("poller", "retrying", { delayMs: Math.round(delay), attempt: retryCount });
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }

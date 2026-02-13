@@ -73,6 +73,9 @@ async function convertToOggOpus(inputPath: string, outputPath: string): Promise<
   ]);
 }
 
+// Max text length for TTS to prevent excessive API costs and timeouts
+const MAX_TTS_TEXT_LENGTH = 4096;
+
 export async function generateAudio(text: string): Promise<TTSResult> {
   const startTime = Date.now();
 
@@ -83,6 +86,12 @@ export async function generateAudio(text: string): Promise<TTSResult> {
   const client = getOpenAIClient();
   if (!client) {
     return { success: false, error: "OPENAI_API_KEY not set", durationMs: Date.now() - startTime };
+  }
+
+  // Truncate very long text to prevent excessive API usage
+  if (text.length > MAX_TTS_TEXT_LENGTH) {
+    text = text.substring(0, MAX_TTS_TEXT_LENGTH);
+    debug("tts", "text_truncated_for_tts", { originalLength: text.length, maxLength: MAX_TTS_TEXT_LENGTH });
   }
 
   const config = getConfig();

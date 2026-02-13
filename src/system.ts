@@ -67,7 +67,7 @@ export function listProcesses(filter?: string): string {
   }
   const cmd = filter
     ? `ps aux | head -1; ps aux | grep -i "${filter}" | grep -v grep | head -30`
-    : `ps aux --sort=-%mem | head -25`;
+    : `ps aux -m | head -25`;
   return truncate(safeExec(cmd));
 }
 
@@ -268,7 +268,7 @@ export function cleanupSuggestions(): string {
 // ============ NETWORK ============
 
 export function activeConnections(): string {
-  return truncate(safeExec(`netstat -an | grep ESTABLISHED | head -30 2>&1`));
+  return truncate(safeExec(`netstat -anp tcp 2>/dev/null | grep ESTABLISHED | head -20`));
 }
 
 export function listeningPorts(): string {
@@ -312,11 +312,11 @@ export function systemOverview(): string {
   parts.push(`DISK: ${disk.trim()}`);
 
   // Top processes by CPU
-  const topCpu = safeExec("ps aux --sort=-%cpu | head -6 | awk '{printf \"%-12s %5s %5s %s\\n\", $1, $3, $4, $11}'");
+  const topCpu = safeExec("ps aux -r | head -6 | awk '{printf \"%-12s %5s %5s %s\\n\", $1, $3, $4, $11}'");
   parts.push(`TOP CPU:\n${topCpu.trim()}`);
 
   // Top processes by memory
-  const topMem = safeExec("ps aux --sort=-%mem | head -6 | awk '{printf \"%-12s %5s %5s %s\\n\", $1, $3, $4, $11}'");
+  const topMem = safeExec("ps aux -m | head -6 | awk '{printf \"%-12s %5s %5s %s\\n\", $1, $3, $4, $11}'");
   parts.push(`TOP MEM:\n${topMem.trim()}`);
 
   // Docker summary

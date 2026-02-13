@@ -202,6 +202,21 @@ export function loadConfig(): GatewayConfig {
       },
     };
 
+    // Validate critical numeric values
+    if (currentConfig.healthCheckIntervalMs < 5000) {
+      console.warn("[Config] healthCheckIntervalMs too low, clamping to 5000ms");
+      currentConfig.healthCheckIntervalMs = 5000;
+    }
+    if (currentConfig.logRetentionDays < 1) {
+      currentConfig.logRetentionDays = 1;
+    }
+    if (currentConfig.sessionResetIntervalHours < 0) {
+      currentConfig.sessionResetIntervalHours = 0;
+    }
+    if (currentConfig.maxRetries < 0 || currentConfig.maxRetries > 10) {
+      currentConfig.maxRetries = DEFAULT_CONFIG.maxRetries;
+    }
+
     return currentConfig;
   } catch (err) {
     console.error("[Config] Failed to load config, using defaults:", err);

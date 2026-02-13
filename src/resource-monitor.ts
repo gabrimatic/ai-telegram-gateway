@@ -101,7 +101,12 @@ function getDarwinPercentUsed(totalMem: number): number | null {
 
 export async function getDiskUsage(path: string): Promise<DiskUsage | null> {
   try {
-    const { stdout } = await execAsync(`df -k "${path}"`);
+    // Validate path to prevent command injection
+    if (/[;&|`$"'\\<>(){}!\n\r]/.test(path)) {
+      error("resource-monitor", "invalid_disk_path", { path });
+      return null;
+    }
+    const { stdout } = await execAsync(`df -k "${path}"`, { timeout: 10000 });
     const lines = stdout.trim().split("\n");
     if (lines.length < 2) {
       error("resource-monitor", "df_parse_error", { reason: "insufficient_lines", path });
@@ -119,6 +124,10 @@ export async function getDiskUsage(path: string): Promise<DiskUsage | null> {
     const total = parseInt(parts[1], 10) * 1024;
     const used = parseInt(parts[2], 10) * 1024;
     const available = parseInt(parts[3], 10) * 1024;
+    if (total <= 0) {
+      error("resource-monitor", "df_parse_error", { reason: "invalid_total", path, total });
+      return null;
+    }
     const percentUsed = (used / total) * 100;
 
     return {
