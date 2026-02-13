@@ -10,15 +10,17 @@ import { incrementMessages, incrementErrors } from "./health";
 import { recordSuccess, recordFailure } from "./metrics";
 import { buildSystemPrompt, wrapWithSystemPrompt, SessionContext } from "./system-prompt";
 import { loadMemoryContext } from "./memory";
+import { getConversationKeyFromContext } from "./conversation-context";
 
 // Forward a prompt to Claude and reply with the response
 export async function forwardToClaude(ctx: Context, prompt: string): Promise<boolean> {
   try {
     const config = getConfig();
+    const conversationKey = getConversationKeyFromContext(ctx);
     let finalPrompt = prompt;
 
     if (config.enableSystemPrompt) {
-      const stats = getAIStats();
+      const stats = getAIStats(conversationKey);
       const context: SessionContext = {
         messageCount: stats?.messageCount ?? 0,
         recentFailures: stats?.recentFailures ?? 0,
@@ -30,7 +32,7 @@ export async function forwardToClaude(ctx: Context, prompt: string): Promise<boo
       finalPrompt = wrapWithSystemPrompt(systemPrompt, prompt);
     }
 
-    const result = await runAI(finalPrompt);
+    const result = await runAI(finalPrompt, undefined, conversationKey);
     incrementMessages();
 
     if (result.success && result.response.trim()) {
@@ -55,10 +57,11 @@ export async function forwardToClaude(ctx: Context, prompt: string): Promise<boo
 export async function forwardToClaudeWithKeyboard(ctx: Context, prompt: string, keyboard: InlineKeyboard): Promise<boolean> {
   try {
     const config = getConfig();
+    const conversationKey = getConversationKeyFromContext(ctx);
     let finalPrompt = prompt;
 
     if (config.enableSystemPrompt) {
-      const stats = getAIStats();
+      const stats = getAIStats(conversationKey);
       const context: SessionContext = {
         messageCount: stats?.messageCount ?? 0,
         recentFailures: stats?.recentFailures ?? 0,
@@ -70,7 +73,7 @@ export async function forwardToClaudeWithKeyboard(ctx: Context, prompt: string, 
       finalPrompt = wrapWithSystemPrompt(systemPrompt, prompt);
     }
 
-    const result = await runAI(finalPrompt);
+    const result = await runAI(finalPrompt, undefined, conversationKey);
     incrementMessages();
 
     if (result.success && result.response.trim()) {

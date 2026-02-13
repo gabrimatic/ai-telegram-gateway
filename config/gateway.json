@@ -52,5 +52,11 @@
     "activeHoursStart": 8,
     "activeHoursEnd": 23,
     "timezone": "Europe/Berlin"
+  },
+  "conversation": {
+    "maxActiveSessions": 24,
+    "idleTtlMinutes": 30,
+    "replyContextMaxChars": 500,
+    "enableReplyContextInjection": true
   }
 }

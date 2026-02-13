@@ -33,17 +33,22 @@ export interface AIStats {
 
 export interface AIBackend {
   providerName: AIProviderName;
-  run: (message: string, onChunk?: (text: string) => Promise<void>) => Promise<AIResponse>;
-  restartSession: () => Promise<void>;
-  stopSession: () => void;
-  isSessionAlive: () => boolean;
-  isSessionStuck: () => boolean;
-  isSessionRestarting: () => boolean;
-  getStats: () => AIStats | null;
+  supportsContextSessions?: boolean;
+  run: (
+    message: string,
+    onChunk?: (text: string) => Promise<void>,
+    contextKey?: string
+  ) => Promise<AIResponse>;
+  restartSession: (contextKey?: string) => Promise<void>;
+  stopSession: (contextKey?: string) => void;
+  isSessionAlive: (contextKey?: string) => boolean;
+  isSessionStuck: (contextKey?: string) => boolean;
+  isSessionRestarting: (contextKey?: string) => boolean;
+  getStats: (contextKey?: string) => AIStats | null;
   setModel: (model: ModelName) => Promise<void>;
   getCurrentModel: () => ModelName;
-  hasProcessedMessages: () => boolean;
-  getSessionId: () => string;
+  hasProcessedMessages: (contextKey?: string) => boolean;
+  getSessionId: (contextKey?: string) => string;
   getCircuitBreakerState: () => string;
   resetCircuitBreaker: () => void;
 }

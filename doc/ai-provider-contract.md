@@ -8,7 +8,7 @@ This doc explains the shared contract first, then the provider-specific behavior
 
 ## Shared Contract
 
-The Telegram layer calls `runAI(message, onChunk?)` through the provider abstraction.
+The Telegram layer calls `runAI(message, onChunk?, contextKey?)` through the provider abstraction.
 
 Expected response shape:
 
@@ -23,6 +23,7 @@ Shared guarantees:
 - Streaming chunks are optional, but final text must be returned.
 - Provider-level circuit breakers protect against repeated failures.
 - Timeout failures are surfaced as normal failed responses, not thrown to the poller.
+- Providers may ignore `contextKey` when they do not support true context sessions.
 
 `AIStats` token fields:
 
@@ -37,8 +38,9 @@ Primary file: `src/ai/providers/claude-cli.ts`
 
 Session model:
 
-- Persistent child process.
-- Message queue inside one long-lived session.
+- Persistent child process per conversation key.
+- Session key is Telegram-native: `chat:<chat_id>:thread:<message_thread_id|main>`.
+- Message queue is isolated per key inside each long-lived `ClaudeSession`.
 - Health timer checks for stuck processing every 30 seconds.
 - Stuck threshold is 120 seconds of no activity while processing.
 
@@ -63,8 +65,9 @@ Failure surfaces:
 
 Operational note:
 
-- This provider preserves conversational context by design.
-- Restarting it clears context and resets in-memory counters.
+- This provider preserves conversational context per key.
+- Session pool limits are enforced with idle TTL and LRU eviction from `conversation.*` config.
+- Restarting a key clears only that key's context; global resets remain available.
 
 ## Codex CLI Provider
 
@@ -99,6 +102,7 @@ Operational note:
 
 - Since each request starts a new process, there is no true persistent backend context.
 - Any continuity comes from the prompt and higher-level gateway behavior.
+- `contextKey` is accepted for contract compatibility but treated as a no-op.
 
 ## Provider Selection and Model Routing
 

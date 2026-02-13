@@ -26,6 +26,7 @@ import {
   getLatestActionContextForUser,
 } from "./interactive-actions";
 import { buildResponseContextLabel } from "./response-context";
+import { buildReplyContextEnvelope, getConversationKeyFromContext } from "./conversation-context";
 import {
   downloadTelegramFile,
   formatFileMetadata,
@@ -181,6 +182,21 @@ function shouldAttachActionKeyboard(prompt: string, response: string): boolean {
   return text.length >= 50 && looksStructured;
 }
 
+function buildPromptWithReplyContext(
+  ctx: Context,
+  messageText: string
+): string {
+  const config = getConfig();
+  if (!config.conversation.enableReplyContextInjection) {
+    return messageText;
+  }
+  return buildReplyContextEnvelope(
+    ctx,
+    messageText,
+    config.conversation.replyContextMaxChars
+  );
+}
+
 /**
  * Handle file messages (documents, photos, videos, etc.)
  */
@@ -240,8 +256,9 @@ async function handleFileMessage(
       return;
     }
 
-    // Get session ID for file storage
-    const sessionId = getSessionId();
+    // Get conversation-keyed session ID for file storage isolation
+    const conversationKey = getConversationKeyFromContext(ctx);
+    const sessionId = getSessionId(conversationKey);
 
     // Determine filename
     const filename = fileInfo.fileName || `${fileType}_${fileInfo.fileId}`;
@@ -421,6 +438,7 @@ async function handleVideoNoteMessage(ctx: Context): Promise<void> {
 async function handleMessage(ctx: Context): Promise<void> {
   const userId = ctx.from?.id?.toString();
   const messageText = ctx.message?.text;
+  const conversationKey = getConversationKeyFromContext(ctx);
 
   if (!userId || !messageText) {
     return;
@@ -526,45 +544,36 @@ async function handleMessage(ctx: Context): Promise<void> {
       await processTextWithClaude(ctx, userId, interactionPrompt, {
         requestId,
         actionBasePrompt: latestContext.prompt,
+        contextKey: conversationKey,
       });
       return;
     }
   }
 
-  // User is allowed, process with AI
-  const isQueued = aiProcessingCount > 0;
   debug("poller", "processing_message", {
     userId,
+    conversationKey,
     length: messageText.length,
     preview: messageText.substring(0, 50),
-    queued: isQueued,
+    activeRequests: aiProcessingCount,
   }, requestId);
 
-  // Only check session health for the first message.
-  // If the AI is already processing, the new message will be queued into the
-  // same session (preserving conversation context) rather than triggering a
-  // restart that would kill the in-progress response.
-  if (!isQueued) {
-    // Check if session is currently restarting - respond immediately
-    if (isSessionRestarting()) {
-      await ctx.reply(getFallbackRestartingMessage());
-      return;
-    }
+  // Check keyed session health for this conversation.
+  if (isSessionRestarting(conversationKey)) {
+    await ctx.reply(getFallbackRestartingMessage());
+    return;
+  }
 
-    // Check if session is stuck - trigger restart and respond
-    if (isSessionStuck()) {
-      warn("poller", "session_stuck_detected", { userId }, requestId);
-      await ctx.reply(getFallbackStuckMessage());
-      // Trigger restart in background
-      restartSession().catch((err) => {
-        error("poller", "restart_failed", {
-          error: err instanceof Error ? err.message : String(err),
-        }, requestId);
-      });
-      return;
-    }
-  } else {
-    debug("poller", "queueing_mid_stream", { userId, activeRequests: aiProcessingCount }, requestId);
+  if (isSessionStuck(conversationKey)) {
+    warn("poller", "session_stuck_detected", { userId, conversationKey }, requestId);
+    await ctx.reply(getFallbackStuckMessage());
+    restartSession(conversationKey).catch((err) => {
+      error("poller", "restart_failed", {
+        error: err instanceof Error ? err.message : String(err),
+        conversationKey,
+      }, requestId);
+    });
+    return;
   }
 
   inFlightCount++;
@@ -574,11 +583,12 @@ async function handleMessage(ctx: Context): Promise<void> {
 
   try {
     const config = getConfig();
-    let prompt = messageText;
+    const modelInput = buildPromptWithReplyContext(ctx, messageText);
+    let prompt = modelInput;
 
     // Build system prompt if enabled
     if (config.enableSystemPrompt) {
-      const stats = getStats();
+      const stats = getStats(conversationKey);
       const context: SessionContext = {
         messageCount: stats?.messageCount ?? 0,
         recentFailures: stats?.recentFailures ?? 0,
@@ -587,7 +597,7 @@ async function handleMessage(ctx: Context): Promise<void> {
       const systemPrompt = buildSystemPrompt(context, memoryContext, {
         providerDisplayName: config.providerDisplayName,
       });
-      prompt = wrapWithSystemPrompt(systemPrompt, messageText);
+      prompt = wrapWithSystemPrompt(systemPrompt, modelInput);
     }
 
     const onChunk = async (chunk: string): Promise<void> => {
@@ -595,7 +605,7 @@ async function handleMessage(ctx: Context): Promise<void> {
     };
 
     const aiStartTime = Date.now();
-    const result = await runAI(prompt, onChunk);
+    const result = await runAI(prompt, onChunk, conversationKey);
     const responseTimeMs = Date.now() - aiStartTime;
 
     if (hasBackendAuthFailure(result)) {
@@ -620,6 +630,7 @@ async function handleMessage(ctx: Context): Promise<void> {
       }
       debug("poller", "message_processed", {
         userId,
+        conversationKey,
         responseLength: result.response.length,
         responseTimeMs,
       }, requestId);
@@ -643,6 +654,7 @@ async function handleMessage(ctx: Context): Promise<void> {
       await sendErrorResponse(ctx, errorMsg, userId);
       debug("poller", "message_failed", {
         userId,
+        conversationKey,
         error: result.error,
         isTimeout,
       }, requestId);
@@ -680,9 +692,11 @@ async function processTextWithClaude(
     hasFileAttachment?: boolean;
     requestId?: string;
     actionBasePrompt?: string;
+    contextKey?: string;
   }
 ): Promise<void> {
   const requestId = options?.requestId || generateRequestId();
+  const conversationKey = options?.contextKey || getConversationKeyFromContext(ctx);
 
   // Reject when auth is broken
   if (isDegradedMode()) {
@@ -690,31 +704,26 @@ async function processTextWithClaude(
     return;
   }
 
-  const isQueued = aiProcessingCount > 0;
+  if (isSessionRestarting(conversationKey)) {
+    await sendErrorResponse(ctx, getFallbackRestartingMessage(), userId);
+    return;
+  }
 
-  if (!isQueued) {
-    // Check if session is currently restarting
-    if (isSessionRestarting()) {
-      await sendErrorResponse(ctx, getFallbackRestartingMessage(), userId);
-      return;
-    }
+  if (isDeployPending()) {
+    await sendErrorResponse(ctx, "Restarting with a new version. Back in a few seconds!", userId);
+    return;
+  }
 
-    if (isDeployPending()) {
-      await sendErrorResponse(ctx, "Restarting with a new version. Back in a few seconds!", userId);
-      return;
-    }
-
-    // Check if session is stuck
-    if (isSessionStuck()) {
-      warn("poller", "session_stuck_detected", { userId }, requestId);
-      await sendErrorResponse(ctx, getFallbackStuckMessage(), userId);
-      restartSession().catch((err) => {
-        error("poller", "restart_failed", {
-          error: err instanceof Error ? err.message : String(err),
-        }, requestId);
-      });
-      return;
-    }
+  if (isSessionStuck(conversationKey)) {
+    warn("poller", "session_stuck_detected", { userId, conversationKey }, requestId);
+    await sendErrorResponse(ctx, getFallbackStuckMessage(), userId);
+    restartSession(conversationKey).catch((err) => {
+      error("poller", "restart_failed", {
+        error: err instanceof Error ? err.message : String(err),
+        conversationKey,
+      }, requestId);
+    });
+    return;
   }
 
   inFlightCount++;
@@ -727,11 +736,12 @@ async function processTextWithClaude(
 
   try {
     const config = getConfig();
-    let prompt = text;
+    const modelInput = buildPromptWithReplyContext(ctx, text);
+    let prompt = modelInput;
 
     // Build system prompt if enabled
     if (config.enableSystemPrompt) {
-      const stats = getStats();
+      const stats = getStats(conversationKey);
       const context: SessionContext = {
         messageCount: stats?.messageCount ?? 0,
         recentFailures: stats?.recentFailures ?? 0,
@@ -743,7 +753,7 @@ async function processTextWithClaude(
       const systemPrompt = buildSystemPrompt(context, memoryContext, {
         providerDisplayName: config.providerDisplayName,
       });
-      prompt = wrapWithSystemPrompt(systemPrompt, text);
+      prompt = wrapWithSystemPrompt(systemPrompt, modelInput);
     }
 
     const onChunk = async (chunk: string): Promise<void> => {
@@ -751,7 +761,7 @@ async function processTextWithClaude(
     };
 
     const aiStartTime = Date.now();
-    const result = await runAI(prompt, onChunk);
+    const result = await runAI(prompt, onChunk, conversationKey);
     const responseTimeMs = Date.now() - aiStartTime;
 
     if (hasBackendAuthFailure(result)) {
@@ -795,6 +805,7 @@ async function processTextWithClaude(
       }
       debug("poller", "message_processed", {
         userId,
+        conversationKey,
         responseLength: result.response.length,
         responseTimeMs,
       }, requestId);
@@ -817,6 +828,7 @@ async function processTextWithClaude(
       await sendErrorResponse(ctx, errorMsg, userId);
       debug("poller", "message_failed", {
         userId,
+        conversationKey,
         error: result.error,
         isTimeout,
       }, requestId);

@@ -77,6 +77,7 @@ import {
 } from "./sentinel";
 import { env } from "./env";
 import { buildScheduleHomeView } from "./schedule-ui";
+import { getConversationKeyFromContext } from "./conversation-context";
 
 const DANGEROUS_COMMANDS = new Set(["sh", "reboot"]);
 const ADMIN_ONLY_COMMANDS = new Set([
@@ -403,13 +404,17 @@ export function buildHelpText(options: {
   return lines.join("\n");
 }
 
-async function resetSessionAndMaybeSendPrompt(ctx: Context, firstPrompt: string): Promise<void> {
+async function resetSessionAndMaybeSendPrompt(
+  ctx: Context,
+  firstPrompt: string,
+  conversationKey: string
+): Promise<void> {
   const trimmedPrompt = firstPrompt.trim();
 
   await ctx.reply("Clearing session... \u{1F9F9}\u{2728}");
 
   // Step 1: Stop the managed session gracefully
-  stopSession();
+  stopSession(conversationKey);
 
   // Step 2: Kill any orphaned provider processes (SIGTERM first for graceful shutdown)
   const providerConfig = getProviderProcessConfig(getConfiguredProviderName(), {
@@ -443,7 +448,7 @@ async function resetSessionAndMaybeSendPrompt(ctx: Context, firstPrompt: string)
   await new Promise(resolve => setTimeout(resolve, 200));
 
   // Step 6: Start fresh session
-  await restartSession();
+  await restartSession(conversationKey);
   await ctx.reply("Fresh start! \u{1F31F} Previous conversation is gone, but your schedules are still safe \u{1F4BE}");
 
   if (trimmedPrompt) {
@@ -457,6 +462,7 @@ export async function handleCommand(
   command: string,
   args: string
 ): Promise<boolean> {
+  const conversationKey = getConversationKeyFromContext(ctx);
   const userId = ctx.from?.id?.toString();
   const allowlist = await loadAllowlist();
   const isAllowed = userId && isUserAllowed(userId, allowlist);
@@ -544,12 +550,12 @@ export async function handleCommand(
     }
 
     case "clear": {
-      await resetSessionAndMaybeSendPrompt(ctx, args);
+      await resetSessionAndMaybeSendPrompt(ctx, args, conversationKey);
       return true;
     }
 
     case "new": {
-      await resetSessionAndMaybeSendPrompt(ctx, args);
+      await resetSessionAndMaybeSendPrompt(ctx, args, conversationKey);
       return true;
     }
 
@@ -1562,10 +1568,10 @@ Or pass an absolute path.`, { parse_mode: "Markdown" });
         .text("\u{1F480} Kill", "session_kill");
 
       if (!sessionSub || sessionSub === "status") {
-        const sessStats = getAIStats();
-        const sessIsAlive = isSessionAlive();
+        const sessStats = getAIStats(conversationKey);
+        const sessIsAlive = isSessionAlive(conversationKey);
         const sessCB = getCircuitBreakerState();
-        const sessSID = getSessionId();
+        const sessSID = getSessionId(conversationKey);
         const sessModelName = getCurrentModel();
 
         let sessInfo = `\u{1F5A5} *Session Status*\n\n`;
@@ -1588,7 +1594,7 @@ Or pass an absolute path.`, { parse_mode: "Markdown" });
 
       if (sessionSub === "kill") {
         await ctx.reply("\u{1F480} Force killing current session...");
-        stopSession();
+        stopSession(conversationKey);
         const sessionProvCfg = getProviderProcessConfig(getConfiguredProviderName(), {
           mcpConfigPath: getConfig().mcpConfigPath,
         });
@@ -1600,7 +1606,7 @@ Or pass an absolute path.`, { parse_mode: "Markdown" });
       }
 
       if (sessionSub === "new") {
-        await resetSessionAndMaybeSendPrompt(ctx, firstPrompt);
+        await resetSessionAndMaybeSendPrompt(ctx, firstPrompt, conversationKey);
         return true;
       }
 

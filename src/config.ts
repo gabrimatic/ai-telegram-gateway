@@ -38,6 +38,13 @@ export interface SentinelConfig {
   timezone: string;
 }
 
+export interface ConversationConfig {
+  maxActiveSessions: number;
+  idleTtlMinutes: number;
+  replyContextMaxChars: number;
+  enableReplyContextInjection: boolean;
+}
+
 export interface GatewayConfig {
   debug: boolean;
   aiProvider: string;
@@ -71,6 +78,8 @@ export interface GatewayConfig {
   security: SecurityConfig;
   // Sentinel (proactive turn) settings
   sentinel: SentinelConfig;
+  // Conversation context isolation settings
+  conversation: ConversationConfig;
 }
 
 const CONFIG_PATH = env.TG_GATEWAY_CONFIG;
@@ -134,6 +143,12 @@ const DEFAULT_CONFIG: GatewayConfig = {
     activeHoursStart: 8,
     activeHoursEnd: 23,
     timezone: "Europe/Berlin",
+  },
+  conversation: {
+    maxActiveSessions: 24,
+    idleTtlMinutes: 30,
+    replyContextMaxChars: 500,
+    enableReplyContextInjection: true,
   },
 };
 
@@ -227,6 +242,17 @@ export function loadConfig(): GatewayConfig {
         activeHoursEnd: parsed.sentinel?.activeHoursEnd ?? DEFAULT_CONFIG.sentinel.activeHoursEnd,
         timezone: parsed.sentinel?.timezone ?? DEFAULT_CONFIG.sentinel.timezone,
       },
+      conversation: {
+        maxActiveSessions:
+          parsed.conversation?.maxActiveSessions ?? DEFAULT_CONFIG.conversation.maxActiveSessions,
+        idleTtlMinutes:
+          parsed.conversation?.idleTtlMinutes ?? DEFAULT_CONFIG.conversation.idleTtlMinutes,
+        replyContextMaxChars:
+          parsed.conversation?.replyContextMaxChars ?? DEFAULT_CONFIG.conversation.replyContextMaxChars,
+        enableReplyContextInjection:
+          parsed.conversation?.enableReplyContextInjection
+          ?? DEFAULT_CONFIG.conversation.enableReplyContextInjection,
+      },
     };
 
     // Validate critical numeric values
@@ -242,6 +268,15 @@ export function loadConfig(): GatewayConfig {
     }
     if (currentConfig.maxRetries < 0 || currentConfig.maxRetries > 10) {
       currentConfig.maxRetries = DEFAULT_CONFIG.maxRetries;
+    }
+    if (currentConfig.conversation.maxActiveSessions < 1) {
+      currentConfig.conversation.maxActiveSessions = DEFAULT_CONFIG.conversation.maxActiveSessions;
+    }
+    if (currentConfig.conversation.idleTtlMinutes < 1) {
+      currentConfig.conversation.idleTtlMinutes = DEFAULT_CONFIG.conversation.idleTtlMinutes;
+    }
+    if (currentConfig.conversation.replyContextMaxChars < 80) {
+      currentConfig.conversation.replyContextMaxChars = DEFAULT_CONFIG.conversation.replyContextMaxChars;
     }
 
     return currentConfig;

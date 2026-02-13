@@ -44,6 +44,7 @@ import {
   buildScheduleRemoveConfirmView,
   buildScheduleRemoveView,
 } from "./schedule-ui";
+import { getConversationKeyFromContext } from "./conversation-context";
 
 async function isAllowedCallbackUser(ctx: CallbackQueryContext<Context>): Promise<boolean> {
   const userId = ctx.from?.id?.toString();
@@ -60,10 +61,10 @@ async function isAdminCallbackUser(ctx: CallbackQueryContext<Context>): Promise<
   return isAdminUser(userId, allowlist);
 }
 
-function withSystemPrompt(prompt: string): string {
+function withSystemPrompt(prompt: string, contextKey?: string): string {
   const config = getConfig();
   if (!config.enableSystemPrompt) return prompt;
-  const stats = getAIStats();
+  const stats = getAIStats(contextKey);
   const context: SessionContext = {
     messageCount: stats?.messageCount ?? 0,
     recentFailures: stats?.recentFailures ?? 0,
@@ -217,6 +218,7 @@ export async function handleWeatherCallback(ctx: CallbackQueryContext<Context>):
     await ctx.answerCallbackQuery("Not authorized");
     return;
   }
+  const conversationKey = getConversationKeyFromContext(ctx as unknown as Context);
   const city = ctx.callbackQuery.data.replace("weather_", "");
   await ctx.answerCallbackQuery("Fetching weather...");
 
@@ -227,7 +229,7 @@ export async function handleWeatherCallback(ctx: CallbackQueryContext<Context>):
     let finalPrompt = prompt;
 
     if (config.enableSystemPrompt) {
-      const stats = getAIStats();
+      const stats = getAIStats(conversationKey);
       const context: SessionContext = {
         messageCount: stats?.messageCount ?? 0,
         recentFailures: stats?.recentFailures ?? 0,
@@ -239,7 +241,7 @@ export async function handleWeatherCallback(ctx: CallbackQueryContext<Context>):
       finalPrompt = wrapWithSystemPrompt(systemPrompt, prompt);
     }
 
-    const result = await runAI(finalPrompt);
+    const result = await runAI(finalPrompt, undefined, conversationKey);
     incrementMessages();
 
     if (result.success && result.response.trim()) {
@@ -497,6 +499,7 @@ export async function handleModelCallback(ctx: CallbackQueryContext<Context>): P
 // ============ SESSION MANAGEMENT CALLBACKS ============
 
 export async function handleSessionCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
+  const conversationKey = getConversationKeyFromContext(ctx as unknown as Context);
   const action = ctx.callbackQuery.data.replace("session_", "");
   try {
     const isAdmin = await isAdminCallbackUser(ctx);
@@ -507,10 +510,10 @@ export async function handleSessionCallback(ctx: CallbackQueryContext<Context>):
 
     switch (action) {
       case "status": {
-        const stats = getAIStats();
-        const alive = isSessionAlive();
+        const stats = getAIStats(conversationKey);
+        const alive = isSessionAlive(conversationKey);
         const cbState = getCircuitBreakerState();
-        const sessionId = getSessionId();
+        const sessionId = getSessionId(conversationKey);
         const model = getCurrentModel();
 
         let status = `*Session Status*\n\n`;
@@ -539,7 +542,7 @@ export async function handleSessionCallback(ctx: CallbackQueryContext<Context>):
       }
       case "kill": {
         await ctx.editMessageText("Force killing session...");
-        stopSession();
+        stopSession(conversationKey);
         const providerConfig = getProviderProcessConfig(getConfiguredProviderName(), {
           mcpConfigPath: getConfig().mcpConfigPath,
         });
@@ -551,9 +554,9 @@ export async function handleSessionCallback(ctx: CallbackQueryContext<Context>):
       }
       case "new": {
         await ctx.editMessageText("Starting fresh session...");
-        stopSession();
+        stopSession(conversationKey);
         await new Promise(resolve => setTimeout(resolve, 500));
-        await restartSession();
+        await restartSession(conversationKey);
         await ctx.editMessageText(`${ICONS.success} New session started!`);
         break;
       }
@@ -612,6 +615,7 @@ export async function handleRebootCancelCallback(ctx: CallbackQueryContext<Conte
 
 export async function handleAIActionCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
   let streamHandler: StreamingResponseHandler | null = null;
+  const conversationKey = getConversationKeyFromContext(ctx as unknown as Context);
   try {
     if (!(await isAllowedCallbackUser(ctx))) {
       await ctx.answerCallbackQuery("Not authorized");
@@ -645,7 +649,7 @@ export async function handleAIActionCallback(ctx: CallbackQueryContext<Context>)
     await ctx.answerCallbackQuery("Working...");
 
     const prompt = buildActionPrompt(action, actionContext.prompt);
-    const finalPrompt = withSystemPrompt(prompt);
+    const finalPrompt = withSystemPrompt(prompt, conversationKey);
     streamHandler = new StreamingResponseHandler(ctx);
     const activeStreamHandler = streamHandler;
     activeStreamHandler.startTypingIndicator();
@@ -653,7 +657,7 @@ export async function handleAIActionCallback(ctx: CallbackQueryContext<Context>)
       await activeStreamHandler.handleChunk(chunk);
     };
 
-    const result = await runAI(finalPrompt, onChunk);
+    const result = await runAI(finalPrompt, onChunk, conversationKey);
     incrementMessages();
 
     if (!result.success) {

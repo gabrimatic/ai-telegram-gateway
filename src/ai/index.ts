@@ -141,33 +141,34 @@ export function getAIProviderName(): AIProviderName {
 
 export async function runAI(
   message: string,
-  onChunk?: (text: string) => Promise<void>
+  onChunk?: (text: string) => Promise<void>,
+  contextKey?: string
 ): Promise<AIResponse> {
-  return getBackend().run(message, onChunk);
+  return getBackend().run(message, onChunk, contextKey);
 }
 
-export function isSessionStuck(): boolean {
-  return getBackend().isSessionStuck();
+export function isSessionStuck(contextKey?: string): boolean {
+  return getBackend().isSessionStuck(contextKey);
 }
 
-export function isSessionRestarting(): boolean {
-  return getBackend().isSessionRestarting();
+export function isSessionRestarting(contextKey?: string): boolean {
+  return getBackend().isSessionRestarting(contextKey);
 }
 
-export function isSessionAlive(): boolean {
-  return getBackend().isSessionAlive();
+export function isSessionAlive(contextKey?: string): boolean {
+  return getBackend().isSessionAlive(contextKey);
 }
 
-export async function restartSession(): Promise<void> {
-  return getBackend().restartSession();
+export async function restartSession(contextKey?: string): Promise<void> {
+  return getBackend().restartSession(contextKey);
 }
 
-export function stopSession(): void {
-  getBackend().stopSession();
+export function stopSession(contextKey?: string): void {
+  getBackend().stopSession(contextKey);
 }
 
-export function getStats(): AIStats | null {
-  return getBackend().getStats();
+export function getStats(contextKey?: string): AIStats | null {
+  return getBackend().getStats(contextKey);
 }
 
 export async function setModel(model: ModelName): Promise<void> {
@@ -178,12 +179,12 @@ export function getCurrentModel(): ModelName {
   return getBackend().getCurrentModel();
 }
 
-export function hasProcessedMessages(): boolean {
-  return getBackend().hasProcessedMessages();
+export function hasProcessedMessages(contextKey?: string): boolean {
+  return getBackend().hasProcessedMessages(contextKey);
 }
 
-export function getSessionId(): string {
-  return getBackend().getSessionId();
+export function getSessionId(contextKey?: string): string {
+  return getBackend().getSessionId(contextKey);
 }
 
 export function getCircuitBreakerState(): string {

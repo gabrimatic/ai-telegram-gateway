@@ -32,32 +32,37 @@ export function createStubBackend(): AIBackend {
 
   return {
     providerName: "stub",
-    async run(): Promise<AIResponse> {
+    supportsContextSessions: false,
+    async run(
+      _message: string,
+      _onChunk?: (text: string) => Promise<void>,
+      _contextKey?: string
+    ): Promise<AIResponse> {
       messageCount++;
       recentFailures++;
       lastActivityTime = Date.now();
       return makeError();
     },
-    async restartSession(): Promise<void> {
+    async restartSession(_contextKey?: string): Promise<void> {
       startedAt = new Date();
       messageCount = 0;
       recentFailures = 0;
       lastActivityTime = Date.now();
       sessionId = `stub-${Date.now()}`;
     },
-    stopSession(): void {
+    stopSession(_contextKey?: string): void {
       // No-op for stub backend.
     },
-    isSessionAlive(): boolean {
+    isSessionAlive(_contextKey?: string): boolean {
       return false;
     },
-    isSessionStuck(): boolean {
+    isSessionStuck(_contextKey?: string): boolean {
       return false;
     },
-    isSessionRestarting(): boolean {
+    isSessionRestarting(_contextKey?: string): boolean {
       return false;
     },
-    getStats(): AIStats | null {
+    getStats(_contextKey?: string): AIStats | null {
       return buildStats();
     },
     async setModel(model): Promise<void> {
@@ -66,10 +71,10 @@ export function createStubBackend(): AIBackend {
     getCurrentModel() {
       return currentModel;
     },
-    hasProcessedMessages(): boolean {
+    hasProcessedMessages(_contextKey?: string): boolean {
       return messageCount > 0;
     },
-    getSessionId(): string {
+    getSessionId(_contextKey?: string): string {
       return sessionId;
     },
     getCircuitBreakerState(): string {

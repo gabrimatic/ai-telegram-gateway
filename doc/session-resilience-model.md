@@ -32,20 +32,56 @@ Layer intent:
 From Telegram message to final response:
 
 1. Poller receives message and applies auth checks.
-2. Poller calls AI backend through `runAI(...)`.
-3. Response handler starts typing pulses and accumulates chunks.
-4. For private chats with topic mode, response handler sends throttled `sendMessageDraft` updates while text is generated.
-5. Response handler streams user-visible output via message send/edit flow and keeps replies in the incoming message thread when a `message_thread_id` exists.
-6. Provider returns final result, then response validator evaluates output quality.
-7. Failures are classified and tracked in analytics/self-heal.
-8. User gets final response or clear failure message.
-9. Provider auth prompts (for example `/login`) are suppressed and converted to a gateway error response.
+2. Poller derives a Telegram-native conversation key:
+   - `chat:<chat_id>:thread:<message_thread_id>` for topic messages
+   - `chat:<chat_id>:thread:main` for non-topic messages
+3. Poller optionally injects bounded reply context from `reply_to_message`:
+   - author display name (if available)
+   - replied text/caption snippet
+   - current user message block
+4. Poller calls AI backend through `runAI(..., contextKey)`.
+5. Response handler starts typing pulses and accumulates chunks.
+6. For private chats with topic mode, response handler sends throttled `sendMessageDraft` updates while text is generated.
+7. Response handler streams user-visible output via message send/edit flow and keeps replies in the incoming message thread when a `message_thread_id` exists.
+8. Provider returns final result, then response validator evaluates output quality.
+9. Failures are classified and tracked in analytics/self-heal.
+10. User gets final response or clear failure message.
+11. Provider auth prompts (for example `/login`) are suppressed and converted to a gateway error response.
 
 Draft notes:
 
 - Draft streaming is best-effort only.
 - If Telegram rejects a draft call, draft updates are disabled for that response and normal edit streaming continues.
 - This fallback does not interrupt final response delivery.
+
+## Keyed Session Lifecycle
+
+Claude provider now manages a session pool keyed by Telegram conversation key instead of one global singleton.
+
+Per-key guarantees:
+
+- No cross-key message routing. A key is never sent to another key's process.
+- Queueing is per key because each key has its own `ClaudeSession`.
+- Stuck detection and restart are per key by default.
+
+Pool controls (from `config/gateway.json`):
+
+- `conversation.maxActiveSessions` (default: `24`)
+- `conversation.idleTtlMinutes` (default: `30`)
+- `conversation.replyContextMaxChars` (default: `500`)
+- `conversation.enableReplyContextInjection` (default: `true`)
+
+Eviction behavior:
+
+1. Idle TTL cleanup removes non-busy sessions older than `idleTtlMinutes`.
+2. If pool size still exceeds `maxActiveSessions`, least-recently-used non-busy sessions are evicted.
+3. Busy sessions are never evicted while processing queued/in-flight work.
+
+Operational logs include:
+
+- `conversationKey`
+- `sessionId`
+- `evictionReason` (`idle_ttl`, `lru_limit`, `restart`, `stop`, `stop_all`)
 
 ## Circuit Breaker Behavior
 
@@ -113,7 +149,7 @@ Recovery triggers:
 
 Recovery actions:
 
-- Restart AI session.
+- Restart AI sessions (per-key by default when the failing key is known, global reset path still available for watchdog/self-heal).
 - Force GC when available, then re-check memory.
 - Cleanup temp and old log files under pressure.
 - Terminate runaway `claude` processes above CPU or memory limits.

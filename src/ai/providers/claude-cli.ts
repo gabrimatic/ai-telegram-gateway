@@ -585,6 +585,10 @@ class ClaudeSession extends EventEmitter {
     return Date.now() - this.lastActivityTime > STUCK_THRESHOLD_MS;
   }
 
+  isBusy(): boolean {
+    return this.isProcessing || this.messageQueue.length > 0;
+  }
+
   incrementFailures(): void {
     this.recentFailures++;
   }
@@ -612,10 +616,17 @@ class ClaudeSession extends EventEmitter {
   }
 }
 
-// Singleton session
-let session: ClaudeSession | null = null;
-let isRestarting = false;
+interface ClaudeSessionState {
+  session: ClaudeSession;
+  lastActivityMs: number;
+  isRestarting: boolean;
+}
+
+const sessionStates: Map<string, ClaudeSessionState> = new Map();
 let currentModel: ModelName = getConfig().defaultModel;
+let cleanupTimer: NodeJS.Timeout | null = null;
+const DEFAULT_CONTEXT_KEY = "chat:unknown:thread:main";
+const SESSION_CLEANUP_INTERVAL_MS = 60000;
 
 // Circuit breaker for Claude CLI calls
 const claudeCircuitBreaker = new CircuitBreaker({
@@ -624,23 +635,134 @@ const claudeCircuitBreaker = new CircuitBreaker({
   successThreshold: 2,
 });
 
-/**
- * Check if session is stuck and needs restart.
- * Returns true if session was restarted.
- */
-async function ensureHealthySession(): Promise<boolean> {
-  if (!session) return false;
-  if (isRestarting) return true;
+function getContextKey(contextKey?: string): string {
+  const trimmed = contextKey?.trim();
+  return trimmed ? trimmed : DEFAULT_CONTEXT_KEY;
+}
 
-  if (session.isStuck()) {
-    info("claude", "auto_restarting_stuck_session");
-    isRestarting = true;
+function ensureCleanupTimer(): void {
+  if (cleanupTimer) return;
+  cleanupTimer = setInterval(() => {
+    cleanupSessionPool();
+  }, SESSION_CLEANUP_INTERVAL_MS);
+  cleanupTimer.unref();
+}
+
+function createSessionState(contextKey: string): ClaudeSessionState {
+  try {
+    const session = new ClaudeSession(currentModel);
+    const state: ClaudeSessionState = {
+      session,
+      lastActivityMs: Date.now(),
+      isRestarting: false,
+    };
+    sessionStates.set(contextKey, state);
+    info("claude", "session_state_created", {
+      conversationKey: contextKey,
+      sessionId: session.getStats().sessionId,
+      model: currentModel,
+    });
+    return state;
+  } catch (err) {
+    throw new Error(
+      `Failed to create session for conversation key "${contextKey}": ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    );
+  }
+}
+
+function getOrCreateSessionState(contextKey?: string): ClaudeSessionState {
+  ensureCleanupTimer();
+  const key = getContextKey(contextKey);
+  const existing = sessionStates.get(key);
+  if (existing) {
+    existing.lastActivityMs = Date.now();
+    return existing;
+  }
+  return createSessionState(key);
+}
+
+function getSessionState(contextKey?: string): ClaudeSessionState | null {
+  const key = getContextKey(contextKey);
+  return sessionStates.get(key) ?? null;
+}
+
+function removeSessionState(contextKey: string, evictionReason: string): void {
+  const state = sessionStates.get(contextKey);
+  if (!state) return;
+
+  const stats = state.session.getStats();
+  state.session.stop();
+  cleanupSessionFiles(stats.sessionId);
+  sessionStates.delete(contextKey);
+
+  info("claude", "session_state_evicted", {
+    conversationKey: contextKey,
+    sessionId: stats.sessionId,
+    evictionReason,
+  });
+}
+
+function cleanupSessionPool(): void {
+  if (sessionStates.size === 0) return;
+
+  const now = Date.now();
+  const config = getConfig();
+  const ttlMs = Math.max(1, config.conversation.idleTtlMinutes) * 60 * 1000;
+  const maxActiveSessions = Math.max(1, config.conversation.maxActiveSessions);
+
+  for (const [key, state] of sessionStates.entries()) {
+    const idleMs = now - state.lastActivityMs;
+    if (idleMs > ttlMs && !state.session.isBusy()) {
+      removeSessionState(key, "idle_ttl");
+    }
+  }
+
+  if (sessionStates.size <= maxActiveSessions) {
+    return;
+  }
+
+  const candidates = Array.from(sessionStates.entries())
+    .filter(([, state]) => !state.isRestarting && !state.session.isBusy())
+    .sort((a, b) => a[1].lastActivityMs - b[1].lastActivityMs);
+
+  for (const [key] of candidates) {
+    if (sessionStates.size <= maxActiveSessions) break;
+    removeSessionState(key, "lru_limit");
+  }
+
+  if (sessionStates.size > maxActiveSessions) {
+    warn("claude", "session_pool_limit_exceeded", {
+      activeSessions: sessionStates.size,
+      maxActiveSessions,
+    });
+  }
+}
+
+/**
+ * Check if a keyed session is stuck and needs restart.
+ * Returns true if that session was restarted.
+ */
+async function ensureHealthySession(contextKey?: string): Promise<boolean> {
+  const key = getContextKey(contextKey);
+  const state = getSessionState(key);
+  if (!state) return false;
+  if (state.isRestarting) return true;
+
+  if (state.session.isStuck()) {
+    info("claude", "auto_restarting_stuck_session", {
+      conversationKey: key,
+      sessionId: state.session.getStats().sessionId,
+    });
+    state.isRestarting = true;
     try {
-      session.forceKill();
-      session = new ClaudeSession(currentModel);
-      await session.start();
+      state.session.forceKill();
+      state.session = new ClaudeSession(currentModel);
+      await state.session.start();
+      state.lastActivityMs = Date.now();
     } finally {
-      isRestarting = false;
+      state.isRestarting = false;
     }
     return true;
   }
@@ -649,7 +771,8 @@ async function ensureHealthySession(): Promise<boolean> {
 
 export async function runClaude(
   message: string,
-  onChunk?: (text: string) => Promise<void>
+  onChunk?: (text: string) => Promise<void>,
+  contextKey?: string
 ): Promise<AIResponse> {
   // Reject immediately if auth is known to be broken
   if (isDegradedMode()) {
@@ -670,17 +793,19 @@ export async function runClaude(
     };
   }
 
-  // Check if session is stuck before processing
-  const wasRestarted = await ensureHealthySession();
+  const key = getContextKey(contextKey);
+  cleanupSessionPool();
 
-  if (!session) {
-    session = new ClaudeSession(currentModel);
-  }
+  // Check if session is stuck before processing
+  const wasRestarted = await ensureHealthySession(key);
 
   try {
+    const state = getOrCreateSessionState(key);
+    state.lastActivityMs = Date.now();
     const result = await claudeCircuitBreaker.execute(async () => {
-      return await session!.sendMessage(message, onChunk);
+      return await state.session.sendMessage(message, onChunk);
     });
+    state.lastActivityMs = Date.now();
     if (wasRestarted) {
       result.sessionRestarted = true;
     }
@@ -709,39 +834,85 @@ export async function runClaude(
 }
 
 export function isSessionStuck(): boolean {
-  return session !== null && session.isStuck();
+  for (const state of sessionStates.values()) {
+    if (state.session.isStuck()) return true;
+  }
+  return false;
 }
 
-export function isSessionRestarting(): boolean {
-  return isRestarting;
+export function isSessionStuckForKey(contextKey?: string): boolean {
+  const state = getSessionState(contextKey);
+  return state !== null && state.session.isStuck();
 }
 
-export function stopClaude(): void {
-  if (session) {
-    session.stop();
-    session = null;
+export function isSessionRestarting(contextKey?: string): boolean {
+  if (contextKey) {
+    const state = getSessionState(contextKey);
+    return state?.isRestarting ?? false;
+  }
+  for (const state of sessionStates.values()) {
+    if (state.isRestarting) return true;
+  }
+  return false;
+}
+
+export function stopClaude(contextKey?: string): void {
+  if (contextKey) {
+    removeSessionState(getContextKey(contextKey), "stop");
+    return;
+  }
+
+  for (const [key] of sessionStates.entries()) {
+    removeSessionState(key, "stop_all");
   }
 }
 
-export function isClaudeAlive(): boolean {
-  return session !== null && session.isAlive();
+export function isClaudeAlive(contextKey?: string): boolean {
+  if (contextKey) {
+    const state = getSessionState(contextKey);
+    return state !== null && state.session.isAlive();
+  }
+  for (const state of sessionStates.values()) {
+    if (state.session.isAlive()) return true;
+  }
+  return false;
 }
 
-export async function restartClaudeSession(): Promise<void> {
-  const oldStats = session?.getStats();
-  if (oldStats) {
+export async function restartClaudeSession(contextKey?: string): Promise<void> {
+  if (!contextKey) {
+    stopClaude();
+    const state = createSessionState(DEFAULT_CONTEXT_KEY);
+    state.isRestarting = true;
+    try {
+      await state.session.start();
+      state.lastActivityMs = Date.now();
+    } finally {
+      state.isRestarting = false;
+    }
+    return;
+  }
+
+  const key = getContextKey(contextKey);
+  const oldState = sessionStates.get(key);
+  if (oldState) {
+    const oldStats = oldState.session.getStats();
     info("claude", "session_ending", {
+      conversationKey: key,
       sessionId: oldStats.sessionId,
       messageCount: oldStats.messageCount,
       durationSeconds: oldStats.durationSeconds,
     });
-    // Cleanup files from the old session
-    cleanupSessionFiles(oldStats.sessionId);
   }
 
-  stopClaude();
-  session = new ClaudeSession(currentModel);
-  await session.start();
+  removeSessionState(key, "restart");
+  const nextState = createSessionState(key);
+  nextState.isRestarting = true;
+  try {
+    await nextState.session.start();
+    nextState.lastActivityMs = Date.now();
+  } finally {
+    nextState.isRestarting = false;
+  }
 }
 
 export function getCurrentModel(): ModelName {
@@ -749,37 +920,70 @@ export function getCurrentModel(): ModelName {
 }
 
 export async function setModel(model: ModelName): Promise<void> {
-  if (model === currentModel && session) {
+  if (model === currentModel && sessionStates.size > 0) {
     return; // No change needed
   }
   currentModel = model;
   info("claude", "model_changed", { model });
-  // Restart session with new model
-  await restartClaudeSession();
+  // Reset all session states so new sessions use the selected model.
+  stopClaude();
 }
 
-export function getClaudeStats(): SessionStats | null {
-  return session?.getStats() ?? null;
+function getMostRecentlyActiveState(): ClaudeSessionState | null {
+  if (sessionStates.size === 0) return null;
+  let selected: ClaudeSessionState | null = null;
+  for (const state of sessionStates.values()) {
+    if (!selected || state.lastActivityMs > selected.lastActivityMs) {
+      selected = state;
+    }
+  }
+  return selected;
 }
 
-export function hasProcessedMessages(): boolean {
-  return session !== null && session.getMessageCount() > 0;
+export function getClaudeStats(contextKey?: string): SessionStats | null {
+  if (contextKey) {
+    return getSessionState(contextKey)?.session.getStats() ?? null;
+  }
+  const selected = getMostRecentlyActiveState();
+  return selected?.session.getStats() ?? null;
+}
+
+export function hasProcessedMessages(contextKey?: string): boolean {
+  if (contextKey) {
+    const state = getSessionState(contextKey);
+    return state !== null && state.session.getMessageCount() > 0;
+  }
+  for (const state of sessionStates.values()) {
+    if (state.session.getMessageCount() > 0) return true;
+  }
+  return false;
 }
 
 export function incrementSessionFailures(): void {
-  session?.incrementFailures();
+  for (const state of sessionStates.values()) {
+    state.session.incrementFailures();
+  }
 }
 
 export function resetSessionFailures(): void {
-  session?.resetFailures();
+  for (const state of sessionStates.values()) {
+    state.session.resetFailures();
+  }
 }
 
-export function getSessionId(): string {
-  if (!session) {
+export function getSessionId(contextKey?: string): string {
+  if (contextKey) {
+    const state = getSessionState(contextKey);
+    if (!state) return `temp-${Date.now()}`;
+    return state.session.getStats().sessionId;
+  }
+
+  const selected = getMostRecentlyActiveState();
+  if (!selected) {
     // Return a temporary session ID if no session exists yet
     return `temp-${Date.now()}`;
   }
-  return session.getStats().sessionId;
+  return selected.session.getStats().sessionId;
 }
 
 export function getClaudeCircuitBreakerState(): string {
@@ -792,13 +996,15 @@ export function resetClaudeCircuitBreaker(): void {
 }
 
 export function createClaudeCliBackend(): AIBackend {
+  ensureCleanupTimer();
   return {
     providerName: "claude-cli",
+    supportsContextSessions: true,
     run: runClaude,
     restartSession: restartClaudeSession,
     stopSession: stopClaude,
     isSessionAlive: isClaudeAlive,
-    isSessionStuck,
+    isSessionStuck: isSessionStuckForKey,
     isSessionRestarting,
     getStats: getClaudeStats,
     setModel,

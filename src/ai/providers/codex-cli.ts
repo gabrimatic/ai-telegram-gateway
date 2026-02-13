@@ -69,7 +69,8 @@ function resetSession(): void {
 
 export async function runCodex(
   message: string,
-  onChunk?: (text: string) => Promise<void>
+  onChunk?: (text: string) => Promise<void>,
+  _contextKey?: string
 ): Promise<AIResponse> {
   const breakerState = codexCircuitBreaker.getState();
   if (breakerState === "open") {
@@ -334,7 +335,7 @@ export function isCodexSessionRestarting(): boolean {
   return false; // No persistent session to restart
 }
 
-export async function restartCodexSession(): Promise<void> {
+export async function restartCodexSession(_contextKey?: string): Promise<void> {
   stopCodex();
   resetSession();
   info("codex", "session_reset", { sessionId });
@@ -405,6 +406,7 @@ export function createCodexCliBackend(): AIBackend {
 
   return {
     providerName: "codex-cli",
+    supportsContextSessions: false,
     run: runCodex,
     restartSession: restartCodexSession,
     stopSession: stopCodex,
