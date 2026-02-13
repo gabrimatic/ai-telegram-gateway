@@ -87,7 +87,7 @@ export function isAIBusy(): boolean {
 /**
  * Atomically check if AI is free and acquire a slot.
  * Returns true if slot was acquired, false if AI was busy.
- * Used by heartbeat to prevent races between check and acquire.
+ * Used by sentinel to prevent races between check and acquire.
  */
 export function tryAcquireAISlot(): boolean {
   if (aiProcessingCount > 0) return false;
@@ -861,7 +861,7 @@ export async function createBot(
       { command: "memory", description: "Memory usage" },
       { command: "cpu", description: "CPU info" },
       { command: "health", description: "System health" },
-      { command: "heartbeat", description: "Proactive monitoring" },
+      { command: "sentinel", description: "Proactive monitoring" },
       { command: "analytics", description: "Usage analytics" },
       { command: "errors", description: "Recent errors" },
       { command: "ls", description: "List files" },

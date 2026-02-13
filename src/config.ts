@@ -29,7 +29,7 @@ export interface SecurityConfig {
   argValidationMode: "moderate" | "strict";
 }
 
-export interface HeartbeatConfig {
+export interface SentinelConfig {
   enabled: boolean;
   intervalMinutes: number;
   ackMaxChars: number;
@@ -69,8 +69,8 @@ export interface GatewayConfig {
   resources: ResourcesConfig;
   // Command and validation behavior
   security: SecurityConfig;
-  // Heartbeat (proactive turn) settings
-  heartbeat: HeartbeatConfig;
+  // Sentinel (proactive turn) settings
+  sentinel: SentinelConfig;
 }
 
 const CONFIG_PATH = env.TG_GATEWAY_CONFIG;
@@ -127,7 +127,7 @@ const DEFAULT_CONFIG: GatewayConfig = {
     commandWarningsEnabled: true,
     argValidationMode: "moderate",
   },
-  heartbeat: {
+  sentinel: {
     enabled: false,
     intervalMinutes: 30,
     ackMaxChars: 300,
@@ -219,13 +219,13 @@ export function loadConfig(): GatewayConfig {
         argValidationMode:
           parsed.security?.argValidationMode === "strict" ? "strict" : DEFAULT_CONFIG.security.argValidationMode,
       },
-      heartbeat: {
-        enabled: parsed.heartbeat?.enabled ?? DEFAULT_CONFIG.heartbeat.enabled,
-        intervalMinutes: parsed.heartbeat?.intervalMinutes ?? DEFAULT_CONFIG.heartbeat.intervalMinutes,
-        ackMaxChars: parsed.heartbeat?.ackMaxChars ?? DEFAULT_CONFIG.heartbeat.ackMaxChars,
-        activeHoursStart: parsed.heartbeat?.activeHoursStart ?? DEFAULT_CONFIG.heartbeat.activeHoursStart,
-        activeHoursEnd: parsed.heartbeat?.activeHoursEnd ?? DEFAULT_CONFIG.heartbeat.activeHoursEnd,
-        timezone: parsed.heartbeat?.timezone ?? DEFAULT_CONFIG.heartbeat.timezone,
+      sentinel: {
+        enabled: parsed.sentinel?.enabled ?? DEFAULT_CONFIG.sentinel.enabled,
+        intervalMinutes: parsed.sentinel?.intervalMinutes ?? DEFAULT_CONFIG.sentinel.intervalMinutes,
+        ackMaxChars: parsed.sentinel?.ackMaxChars ?? DEFAULT_CONFIG.sentinel.ackMaxChars,
+        activeHoursStart: parsed.sentinel?.activeHoursStart ?? DEFAULT_CONFIG.sentinel.activeHoursStart,
+        activeHoursEnd: parsed.sentinel?.activeHoursEnd ?? DEFAULT_CONFIG.sentinel.activeHoursEnd,
+        timezone: parsed.sentinel?.timezone ?? DEFAULT_CONFIG.sentinel.timezone,
       },
     };
 

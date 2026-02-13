@@ -45,7 +45,7 @@
     "commandWarningsEnabled": true,
     "argValidationMode": "moderate"
   },
-  "heartbeat": {
+  "sentinel": {
     "enabled": true,
     "intervalMinutes": 30,
     "ackMaxChars": 300,

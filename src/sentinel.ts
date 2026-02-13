@@ -1,14 +1,14 @@
 /**
- * Heartbeat - proactive turn mechanism.
- * Periodically wakes the main Claude session, reads HEARTBEAT.md,
+ * Sentinel - proactive turn mechanism.
+ * Periodically wakes the main Claude session, reads SENTINEL.md,
  * and either silently acks or messages the user with findings.
  *
- * Key difference from task-scheduler: heartbeat runs inside the live
+ * Key difference from task-scheduler: sentinel runs inside the live
  * session via runAI(), so it has full conversation context and memory.
  *
  * NOTE: Model override is intentionally not supported. setModel()
  * restarts the Claude session, which destroys conversation context -
- * the very thing heartbeat exists to leverage. Beats always run on
+ * the very thing sentinel exists to leverage. Beats always run on
  * whatever model the main session is using.
  */
 
@@ -22,16 +22,16 @@ import { tryAcquireAISlot, releaseAISlot } from "./poller";
 
 // --- Constants ---
 
-const HEARTBEAT_DIR = join(homedir(), ".claude", "gateway");
-const HEARTBEAT_MD_PATH = join(HEARTBEAT_DIR, "HEARTBEAT.md");
-const HISTORY_PATH = join(HEARTBEAT_DIR, "heartbeat-history.json");
-const ACK_TOKEN = "HEARTBEAT_OK";
+const SENTINEL_DIR = join(homedir(), ".claude", "gateway");
+const SENTINEL_MD_PATH = join(SENTINEL_DIR, "SENTINEL.md");
+const HISTORY_PATH = join(SENTINEL_DIR, "sentinel-history.json");
+const ACK_TOKEN = "SENTINEL_OK";
 const MAX_HISTORY = 20;
 const BEAT_TIMEOUT_MS = 90_000; // 90s max per beat
 
 // --- Types ---
 
-export interface HeartbeatHistoryEntry {
+export interface SentinelHistoryEntry {
   timestamp: string;
   result: "ack" | "alert" | "skipped" | "error";
   message?: string;
@@ -40,9 +40,9 @@ export interface HeartbeatHistoryEntry {
 
 // --- State ---
 
-let heartbeatInterval: NodeJS.Timeout | null = null;
+let sentinelInterval: NodeJS.Timeout | null = null;
 let beatInProgress = false;
-let history: HeartbeatHistoryEntry[] = [];
+let history: SentinelHistoryEntry[] = [];
 let notifyUser: ((userId: string, message: string) => Promise<void>) | null = null;
 let lastBeatTime: Date | null = null;
 let enabled = false;
@@ -50,14 +50,14 @@ let enabled = false;
 // --- Helpers ---
 
 function ensureDir(): void {
-  if (!existsSync(HEARTBEAT_DIR)) {
-    mkdirSync(HEARTBEAT_DIR, { recursive: true });
+  if (!existsSync(SENTINEL_DIR)) {
+    mkdirSync(SENTINEL_DIR, { recursive: true });
   }
 }
 
 function isWithinActiveHours(): boolean {
   const config = getConfig();
-  const hb = config.heartbeat;
+  const hb = config.sentinel;
   if (!hb) return true;
 
   const now = new Date();
@@ -76,10 +76,10 @@ function isWithinActiveHours(): boolean {
   }
 }
 
-function loadHeartbeatMd(): string | null {
-  if (!existsSync(HEARTBEAT_MD_PATH)) return null;
+function loadSentinelMd(): string | null {
+  if (!existsSync(SENTINEL_MD_PATH)) return null;
   try {
-    const content = readFileSync(HEARTBEAT_MD_PATH, "utf-8");
+    const content = readFileSync(SENTINEL_MD_PATH, "utf-8");
     // Skip if file is empty, whitespace-only, or just headers
     const stripped = content.replace(/^#.*$/gm, "").trim();
     if (stripped.length === 0) return null;
@@ -92,13 +92,13 @@ function loadHeartbeatMd(): string | null {
 function isAckResponse(response: string): boolean {
   const trimmed = response.trim();
   const config = getConfig();
-  const maxChars = config.heartbeat?.ackMaxChars ?? 300;
+  const maxChars = config.sentinel?.ackMaxChars ?? 300;
 
   // Must start with the ack token
   if (!trimmed.startsWith(ACK_TOKEN)) return false;
 
   // If total length is within ackMaxChars, treat as ack
-  // This allows responses like "HEARTBEAT_OK - all systems nominal"
+  // This allows responses like "SENTINEL_OK - all systems nominal"
   return trimmed.length <= maxChars;
 }
 
@@ -109,23 +109,23 @@ function escapeHtml(text: string): string {
     .replace(/>/g, "&gt;");
 }
 
-function buildHeartbeatPrompt(checklistContent: string): string {
+function buildSentinelPrompt(checklistContent: string): string {
   const now = new Date().toISOString();
   return [
-    `[HEARTBEAT] This is a scheduled system health check, NOT a user message.`,
+    `[SENTINEL] This is a scheduled system health check, NOT a user message.`,
     `You may use session context if relevant to the checks below.`,
     `Read the checklist below and execute each item independently.`,
-    `If nothing needs attention, reply with exactly: ${ACK_TOKEN}`,
+    `If all checks pass, return only this token: ${ACK_TOKEN}`,
     `Only include findings that represent actual problems right now.`,
     `Current time: ${now}`,
     ``,
-    `--- HEARTBEAT.md ---`,
+    `--- SENTINEL.md ---`,
     checklistContent,
     `--- END ---`,
   ].join("\n");
 }
 
-function loadHistory(): HeartbeatHistoryEntry[] {
+function loadHistory(): SentinelHistoryEntry[] {
   try {
     if (existsSync(HISTORY_PATH)) {
       const data = readFileSync(HISTORY_PATH, "utf-8");
@@ -147,7 +147,7 @@ function saveHistory(): void {
   }
 }
 
-function addHistory(entry: HeartbeatHistoryEntry): void {
+function addHistory(entry: SentinelHistoryEntry): void {
   history.push(entry);
   if (history.length > MAX_HISTORY) {
     history = history.slice(-MAX_HISTORY);
@@ -170,27 +170,27 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 
 async function runBeat(): Promise<void> {
   if (beatInProgress) {
-    debug("heartbeat", "skipped_in_progress");
+    debug("sentinel", "skipped_in_progress");
     addHistory({ timestamp: new Date().toISOString(), result: "skipped", message: "beat already in progress" });
     return;
   }
 
   if (!isWithinActiveHours()) {
-    debug("heartbeat", "skipped_outside_hours");
+    debug("sentinel", "skipped_outside_hours");
     addHistory({ timestamp: new Date().toISOString(), result: "skipped", message: "outside active hours" });
     return;
   }
 
-  const checklist = loadHeartbeatMd();
+  const checklist = loadSentinelMd();
   if (!checklist) {
-    debug("heartbeat", "skipped_no_checklist");
-    addHistory({ timestamp: new Date().toISOString(), result: "skipped", message: "no HEARTBEAT.md or empty" });
+    debug("sentinel", "skipped_no_checklist");
+    addHistory({ timestamp: new Date().toISOString(), result: "skipped", message: "no SENTINEL.md or empty" });
     return;
   }
 
   // Atomic check-and-acquire: prevents race between isAIBusy check and slot acquisition
   if (!tryAcquireAISlot()) {
-    debug("heartbeat", "skipped_ai_busy");
+    debug("sentinel", "skipped_ai_busy");
     addHistory({ timestamp: new Date().toISOString(), result: "skipped", message: "AI is busy processing user messages" });
     return;
   }
@@ -199,15 +199,15 @@ async function runBeat(): Promise<void> {
   const startTime = Date.now();
 
   try {
-    const prompt = buildHeartbeatPrompt(checklist);
-    info("heartbeat", "beat_starting");
+    const prompt = buildSentinelPrompt(checklist);
+    info("sentinel", "beat_starting");
 
-    const result = await withTimeout(runAI(prompt), BEAT_TIMEOUT_MS, "heartbeat beat");
+    const result = await withTimeout(runAI(prompt), BEAT_TIMEOUT_MS, "sentinel beat");
     const durationMs = Date.now() - startTime;
     lastBeatTime = new Date();
 
     if (!result.success) {
-      logError("heartbeat", "beat_failed", { error: result.error });
+      logError("sentinel", "beat_failed", { error: result.error });
       addHistory({
         timestamp: new Date().toISOString(),
         result: "error",
@@ -220,14 +220,14 @@ async function runBeat(): Promise<void> {
     const response = result.response.trim();
 
     if (isAckResponse(response)) {
-      info("heartbeat", "beat_ack", { durationMs });
+      info("sentinel", "beat_ack", { durationMs });
       addHistory({
         timestamp: new Date().toISOString(),
         result: "ack",
         durationMs,
       });
     } else {
-      info("heartbeat", "beat_alert", { durationMs, responseLength: response.length });
+      info("sentinel", "beat_alert", { durationMs, responseLength: response.length });
       addHistory({
         timestamp: new Date().toISOString(),
         result: "alert",
@@ -241,19 +241,19 @@ async function runBeat(): Promise<void> {
         if (adminId) {
           const icon = "\u{1F493}";
           const safeResponse = escapeHtml(response);
-          await notifyUser(adminId, `${icon} <b>Heartbeat Alert</b>\n\n${safeResponse}`).catch((err) => {
-            logError("heartbeat", "notify_failed", {
+          await notifyUser(adminId, `${icon} <b>Sentinel Alert</b>\n\n${safeResponse}`).catch((err) => {
+            logError("sentinel", "notify_failed", {
               error: err instanceof Error ? err.message : String(err),
             });
           });
         } else {
-          warn("heartbeat", "no_admin_id_for_notification");
+          warn("sentinel", "no_admin_id_for_notification");
         }
       }
     }
   } catch (err) {
     const durationMs = Date.now() - startTime;
-    logError("heartbeat", "beat_error", {
+    logError("sentinel", "beat_error", {
       error: err instanceof Error ? err.message : String(err),
     });
     addHistory({
@@ -270,7 +270,7 @@ async function runBeat(): Promise<void> {
 
 // --- Public API ---
 
-export function initHeartbeat(
+export function initSentinel(
   notifier: (userId: string, message: string) => Promise<void>
 ): void {
   ensureDir();
@@ -280,105 +280,105 @@ export function initHeartbeat(
   history = loadHistory();
 
   const config = getConfig();
-  if (!config.heartbeat?.enabled) {
-    info("heartbeat", "disabled_by_config");
+  if (!config.sentinel?.enabled) {
+    info("sentinel", "disabled_by_config");
     return;
   }
 
-  startHeartbeat();
+  startSentinel();
 }
 
-export function startHeartbeat(): void {
-  if (heartbeatInterval) {
-    warn("heartbeat", "already_running");
+export function startSentinel(): void {
+  if (sentinelInterval) {
+    warn("sentinel", "already_running");
     return;
   }
 
   const config = getConfig();
-  const intervalMs = (config.heartbeat?.intervalMinutes ?? 30) * 60 * 1000;
+  const intervalMs = (config.sentinel?.intervalMinutes ?? 30) * 60 * 1000;
   enabled = true;
 
-  heartbeatInterval = setInterval(() => {
+  sentinelInterval = setInterval(() => {
     runBeat().catch((err) => {
-      logError("heartbeat", "interval_error", {
+      logError("sentinel", "interval_error", {
         error: err instanceof Error ? err.message : String(err),
       });
     });
   }, intervalMs);
 
   // Don't block process exit
-  heartbeatInterval.unref();
+  sentinelInterval.unref();
 
   // Run first beat after a short delay instead of waiting a full interval
   const firstBeatTimer = setTimeout(() => {
     runBeat().catch((err) => {
-      logError("heartbeat", "first_beat_error", {
+      logError("sentinel", "first_beat_error", {
         error: err instanceof Error ? err.message : String(err),
       });
     });
   }, 5000);
   firstBeatTimer.unref();
 
-  info("heartbeat", "started", {
-    intervalMinutes: config.heartbeat?.intervalMinutes ?? 30,
-    activeHours: `${config.heartbeat?.activeHoursStart ?? 8}-${config.heartbeat?.activeHoursEnd ?? 23}`,
-    timezone: config.heartbeat?.timezone ?? "Europe/Berlin",
+  info("sentinel", "started", {
+    intervalMinutes: config.sentinel?.intervalMinutes ?? 30,
+    activeHours: `${config.sentinel?.activeHoursStart ?? 8}-${config.sentinel?.activeHoursEnd ?? 23}`,
+    timezone: config.sentinel?.timezone ?? "Europe/Berlin",
   });
 }
 
-export function stopHeartbeat(): void {
-  if (heartbeatInterval) {
-    clearInterval(heartbeatInterval);
-    heartbeatInterval = null;
+export function stopSentinel(): void {
+  if (sentinelInterval) {
+    clearInterval(sentinelInterval);
+    sentinelInterval = null;
   }
   enabled = false;
-  info("heartbeat", "stopped");
+  info("sentinel", "stopped");
 }
 
-export function isHeartbeatRunning(): boolean {
-  return heartbeatInterval !== null && enabled;
+export function isSentinelRunning(): boolean {
+  return sentinelInterval !== null && enabled;
 }
 
 export function triggerBeat(): Promise<void> {
   return runBeat();
 }
 
-export function getHeartbeatStatus(): {
+export function getSentinelStatus(): {
   enabled: boolean;
   running: boolean;
   lastBeatTime: Date | null;
   beatInProgress: boolean;
-  history: HeartbeatHistoryEntry[];
+  history: SentinelHistoryEntry[];
   checklistExists: boolean;
 } {
   return {
     enabled,
-    running: heartbeatInterval !== null,
+    running: sentinelInterval !== null,
     lastBeatTime,
     beatInProgress,
     history: [...history],
-    checklistExists: existsSync(HEARTBEAT_MD_PATH),
+    checklistExists: existsSync(SENTINEL_MD_PATH),
   };
 }
 
-export function getHeartbeatHistory(): HeartbeatHistoryEntry[] {
+export function getSentinelHistory(): SentinelHistoryEntry[] {
   return [...history];
 }
 
-export function getHeartbeatMdPath(): string {
-  return HEARTBEAT_MD_PATH;
+export function getSentinelMdPath(): string {
+  return SENTINEL_MD_PATH;
 }
 
-export function getHeartbeatMdContent(): string | null {
-  return loadHeartbeatMd();
+export function getSentinelMdContent(): string | null {
+  return loadSentinelMd();
 }
 
-export function writeHeartbeatMd(content: string): void {
+export function writeSentinelMd(content: string): void {
   ensureDir();
-  writeFileSync(HEARTBEAT_MD_PATH, content, "utf-8");
+  writeFileSync(SENTINEL_MD_PATH, content, "utf-8");
 }
 
-const DEFAULT_HEARTBEAT_MD = `# Heartbeat Checklist
+const DEFAULT_SENTINEL_MD = `# Sentinel Checklist
 
 ## System Health
 - Check disk usage on /. Alert if above 90%.
@@ -392,9 +392,9 @@ const DEFAULT_HEARTBEAT_MD = `# Heartbeat Checklist
 - Confirm the Telegram gateway is responsive (you're running this, so it is).
 `;
 
-export function createDefaultHeartbeatMd(): boolean {
-  if (existsSync(HEARTBEAT_MD_PATH)) return false;
+export function createDefaultSentinelMd(): boolean {
+  if (existsSync(SENTINEL_MD_PATH)) return false;
   ensureDir();
-  writeFileSync(HEARTBEAT_MD_PATH, DEFAULT_HEARTBEAT_MD, "utf-8");
+  writeFileSync(SENTINEL_MD_PATH, DEFAULT_SENTINEL_MD, "utf-8");
   return true;
 }

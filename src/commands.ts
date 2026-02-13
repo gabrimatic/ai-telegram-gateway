@@ -65,16 +65,16 @@ import { getMetrics } from "./metrics";
 import { formatRecoveryLog, formatErrorPatterns, getRecentErrorPatterns } from "./self-heal";
 import { isWatchdogRunning } from "./watchdog";
 import {
-  isHeartbeatRunning,
-  startHeartbeat,
-  stopHeartbeat,
+  isSentinelRunning,
+  startSentinel,
+  stopSentinel,
   triggerBeat,
-  getHeartbeatStatus,
-  getHeartbeatMdPath,
-  getHeartbeatMdContent,
-  writeHeartbeatMd,
-  createDefaultHeartbeatMd,
-} from "./heartbeat";
+  getSentinelStatus,
+  getSentinelMdPath,
+  getSentinelMdContent,
+  writeSentinelMd,
+  createDefaultSentinelMd,
+} from "./sentinel";
 import { env } from "./env";
 import { buildScheduleHomeView } from "./schedule-ui";
 
@@ -90,7 +90,7 @@ const ADMIN_ONLY_COMMANDS = new Set([
   "find",
   "git",
   "health",
-  "heartbeat",
+  "sentinel",
   "kill",
   "ls",
   "memory",
@@ -173,7 +173,7 @@ export function buildHelpText(options: {
   lines.push("Interaction cues: `again`, `shorter`, `deeper`");
 
   if (options.isAdmin) {
-    lines.push("/session /heartbeat");
+    lines.push("/session /sentinel");
     lines.push("");
     lines.push("\uD83D\uDDA5 *SERVER (ADMIN)*");
     lines.push("/pm2 /git /net /sh /ps /kill /top /reboot");
@@ -861,23 +861,23 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
       return true;
     }
 
-    // ============ HEARTBEAT (PROACTIVE TURN) ============
+    // ============ SENTINEL (PROACTIVE TURN) ============
 
-    case "heartbeat": {
+    case "sentinel": {
       const hbArgs = args.trim().toLowerCase();
-      const hbStatus = getHeartbeatStatus();
+      const hbStatus = getSentinelStatus();
       const config = getConfig();
 
       if (!hbArgs || hbArgs === "status") {
         const statusIcon = hbStatus.running ? "\u{1F49A}" : "\u{1F6D1}";
         const lines: string[] = [];
-        lines.push(`${statusIcon} *Heartbeat ${hbStatus.running ? "Active" : "Stopped"}*`);
+        lines.push(`${statusIcon} *Sentinel ${hbStatus.running ? "Active" : "Stopped"}*`);
         lines.push("");
-        lines.push(`Interval: ${config.heartbeat.intervalMinutes}m`);
-        lines.push(`Active hours: ${config.heartbeat.activeHoursStart}:00-${config.heartbeat.activeHoursEnd}:00 (${config.heartbeat.timezone})`);
+        lines.push(`Interval: ${config.sentinel.intervalMinutes}m`);
+        lines.push(`Active hours: ${config.sentinel.activeHoursStart}:00-${config.sentinel.activeHoursEnd}:00 (${config.sentinel.timezone})`);
         lines.push(`Checklist: ${hbStatus.checklistExists ? "found" : "not found"}`);
         if (hbStatus.lastBeatTime) {
-          lines.push(`Last beat: ${hbStatus.lastBeatTime.toLocaleString("en-GB", { timeZone: config.heartbeat.timezone, dateStyle: "short", timeStyle: "short" })}`);
+          lines.push(`Last beat: ${hbStatus.lastBeatTime.toLocaleString("en-GB", { timeZone: config.sentinel.timezone, dateStyle: "short", timeStyle: "short" })}`);
         }
         lines.push("");
 
@@ -886,7 +886,7 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
           const recent = hbStatus.history.slice(-5).reverse();
           for (const entry of recent) {
             const icon = entry.result === "ack" ? "\u{2705}" : entry.result === "alert" ? "\u{1F6A8}" : entry.result === "skipped" ? "\u{23ED}" : "\u{274C}";
-            const time = new Date(entry.timestamp).toLocaleString("en-GB", { timeZone: config.heartbeat.timezone, timeStyle: "short" });
+            const time = new Date(entry.timestamp).toLocaleString("en-GB", { timeZone: config.sentinel.timezone, timeStyle: "short" });
             const dur = entry.durationMs ? ` (${(entry.durationMs / 1000).toFixed(1)}s)` : "";
             const msg = entry.message ? ` - ${entry.message.substring(0, 60)}` : "";
             lines.push(`${icon} ${time}${dur}${msg}`);
@@ -901,32 +901,32 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
 
       if (hbArgs === "on") {
         if (hbStatus.running) {
-          await ctx.reply("\u{1F49A} Heartbeat is already running!");
+          await ctx.reply("\u{1F49A} Sentinel is already running!");
           return true;
         }
-        startHeartbeat();
-        await ctx.reply("\u{1F49A} Heartbeat started! I'll check HEARTBEAT.md every " + config.heartbeat.intervalMinutes + " minutes.");
+        startSentinel();
+        await ctx.reply("\u{1F49A} Sentinel started! I'll check SENTINEL.md every " + config.sentinel.intervalMinutes + " minutes.");
         return true;
       }
 
       if (hbArgs === "off") {
         if (!hbStatus.running) {
-          await ctx.reply("\u{1F6D1} Heartbeat is already stopped.");
+          await ctx.reply("\u{1F6D1} Sentinel is already stopped.");
           return true;
         }
-        stopHeartbeat();
-        await ctx.reply("\u{1F6D1} Heartbeat stopped.");
+        stopSentinel();
+        await ctx.reply("\u{1F6D1} Sentinel stopped.");
         return true;
       }
 
       if (hbArgs === "run") {
         if (!hbStatus.checklistExists) {
-          await ctx.reply(`${ICONS.warning} No HEARTBEAT.md found at \`${getHeartbeatMdPath()}\`. Create one first!`, { parse_mode: "Markdown" });
+          await ctx.reply(`${ICONS.warning} No SENTINEL.md found at \`${getSentinelMdPath()}\`. Create one first!`, { parse_mode: "Markdown" });
           return true;
         }
-        await ctx.reply("\u{1F493} Running heartbeat now...");
+        await ctx.reply("\u{1F493} Running sentinel now...");
         triggerBeat().catch((err) => {
-          logError("commands", "heartbeat_trigger_error", {
+          logError("commands", "sentinel_trigger_error", {
             error: err instanceof Error ? err.message : String(err),
           });
         });
@@ -936,28 +936,28 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
       if (hbArgs === "edit" || hbArgs.startsWith("edit ")) {
         const editText = args.trim().substring(4).trim(); // strip "edit" prefix
         if (editText) {
-          // Write new content to HEARTBEAT.md
-          writeHeartbeatMd(editText);
-          await ctx.reply(`${ICONS.success} HEARTBEAT.md updated!`);
+          // Write new content to SENTINEL.md
+          writeSentinelMd(editText);
+          await ctx.reply(`${ICONS.success} SENTINEL.md updated!`);
           return true;
         }
         // No text provided - show current content
-        const content = getHeartbeatMdContent();
+        const content = getSentinelMdContent();
         if (!content) {
-          await ctx.reply(`No HEARTBEAT.md found.\n\nUse \`/heartbeat create\` to bootstrap one, or \`/heartbeat edit <content>\` to write one.`, { parse_mode: "Markdown" });
+          await ctx.reply(`No SENTINEL.md found.\n\nUse \`/sentinel create\` to bootstrap one, or \`/sentinel edit <content>\` to write one.`, { parse_mode: "Markdown" });
         } else {
           const truncated = content.length > 2000 ? content.substring(0, 2000) + "\n...(truncated)" : content;
-          await ctx.reply(`*HEARTBEAT.md*\n\n\`\`\`\n${sanitizeCodeBlock(truncated)}\n\`\`\`\n\nUpdate with: \`/heartbeat edit <new content>\``, { parse_mode: "Markdown" });
+          await ctx.reply(`*SENTINEL.md*\n\n\`\`\`\n${sanitizeCodeBlock(truncated)}\n\`\`\`\n\nUpdate with: \`/sentinel edit <new content>\``, { parse_mode: "Markdown" });
         }
         return true;
       }
 
       if (hbArgs === "create") {
-        const created = createDefaultHeartbeatMd();
+        const created = createDefaultSentinelMd();
         if (created) {
-          await ctx.reply(`${ICONS.success} Created default HEARTBEAT.md at \`${getHeartbeatMdPath()}\`\n\nUse \`/heartbeat edit\` to view or modify it.`, { parse_mode: "Markdown" });
+          await ctx.reply(`${ICONS.success} Created default SENTINEL.md at \`${getSentinelMdPath()}\`\n\nUse \`/sentinel edit\` to view or modify it.`, { parse_mode: "Markdown" });
         } else {
-          await ctx.reply(`HEARTBEAT.md already exists. Use \`/heartbeat edit\` to view or update it.`, { parse_mode: "Markdown" });
+          await ctx.reply(`SENTINEL.md already exists. Use \`/sentinel edit\` to view or update it.`, { parse_mode: "Markdown" });
         }
         return true;
       }
@@ -966,29 +966,29 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
         const parts = hbArgs.split(/\s+/);
         const minutes = parseInt(parts[1], 10);
         if (isNaN(minutes) || minutes < 1 || minutes > 1440) {
-          await ctx.reply(`${ICONS.error} Usage: \`/heartbeat interval <1-1440>\``, { parse_mode: "Markdown" });
+          await ctx.reply(`${ICONS.error} Usage: \`/sentinel interval <1-1440>\``, { parse_mode: "Markdown" });
           return true;
         }
-        config.heartbeat.intervalMinutes = minutes;
-        updateConfigOnDisk(["heartbeat", "intervalMinutes"], minutes);
+        config.sentinel.intervalMinutes = minutes;
+        updateConfigOnDisk(["sentinel", "intervalMinutes"], minutes);
         if (hbStatus.running) {
-          stopHeartbeat();
-          startHeartbeat();
+          stopSentinel();
+          startSentinel();
         }
-        await ctx.reply(`\u{2705} Heartbeat interval set to ${minutes} minutes.${hbStatus.running ? " Timer restarted." : ""}`);
+        await ctx.reply(`\u{2705} Sentinel interval set to ${minutes} minutes.${hbStatus.running ? " Timer restarted." : ""}`);
         return true;
       }
 
       await ctx.reply(
-        `*Heartbeat Commands:*\n\n` +
-        `/heartbeat - Show status\n` +
-        `/heartbeat on - Start heartbeat\n` +
-        `/heartbeat off - Stop heartbeat\n` +
-        `/heartbeat run - Trigger immediate beat\n` +
-        `/heartbeat edit - Show HEARTBEAT.md\n` +
-        `/heartbeat edit <text> - Replace HEARTBEAT.md\n` +
-        `/heartbeat create - Bootstrap default checklist\n` +
-        `/heartbeat interval <min> - Change interval`,
+        `*Sentinel Commands:*\n\n` +
+        `/sentinel - Show status\n` +
+        `/sentinel on - Start sentinel\n` +
+        `/sentinel off - Stop sentinel\n` +
+        `/sentinel run - Trigger immediate beat\n` +
+        `/sentinel edit - Show SENTINEL.md\n` +
+        `/sentinel edit <text> - Replace SENTINEL.md\n` +
+        `/sentinel create - Bootstrap default checklist\n` +
+        `/sentinel interval <min> - Change interval`,
         { parse_mode: "Markdown" }
       );
       return true;

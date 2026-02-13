@@ -210,37 +210,37 @@ Manages the predefined random check-in preset:
 - `off`: disables planner and cancels queued check-ins.
 - `regen`: rebuilds today’s random check-in slots.
 
-## Heartbeat Commands
+## Sentinel Commands
 
-### `/heartbeat`
+### `/sentinel`
 
-Shows heartbeat status and recent beat history.
+Shows sentinel status and recent beat history.
 
-### `/heartbeat on`
+### `/sentinel on`
 
-Starts heartbeat timer loop.
+Starts sentinel timer loop.
 
-### `/heartbeat off`
+### `/sentinel off`
 
-Stops heartbeat timer loop.
+Stops sentinel timer loop.
 
-### `/heartbeat run`
+### `/sentinel run`
 
-Triggers one immediate heartbeat execution.
+Triggers one immediate sentinel execution.
 
-### `/heartbeat edit`
+### `/sentinel edit`
 
-Shows current `HEARTBEAT.md` content if present.
+Shows current `SENTINEL.md` content if present.
 
-### `/heartbeat edit <text>`
+### `/sentinel edit <text>`
 
-Replaces `HEARTBEAT.md` content with provided text.
+Replaces `SENTINEL.md` content with provided text.
 
-### `/heartbeat create`
+### `/sentinel create`
 
-Creates default heartbeat checklist if missing.
+Creates default sentinel checklist if missing.
 
-### `/heartbeat interval <1-1440>`
+### `/sentinel interval <1-1440>`
 
 Updates interval minutes, and restarts timer if running.
 

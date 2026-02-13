@@ -157,10 +157,10 @@ export function buildSystemPrompt(
 
   lines.push(
     "",
-    "HEARTBEAT:",
-    "- The bot has a heartbeat system that periodically checks ~/.claude/gateway/HEARTBEAT.md",
-    "- You may receive [HEARTBEAT] prompts - follow the checklist strictly",
-    "- Reply HEARTBEAT_OK if nothing needs attention",
+    "SENTINEL:",
+    "- The bot has a sentinel system that periodically checks ~/.claude/gateway/SENTINEL.md",
+    "- You may receive [SENTINEL] prompts and must execute checklist items as written",
+    "- For a healthy cycle, respond with the token SENTINEL_OK",
     ""
   );
 
