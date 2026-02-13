@@ -33,11 +33,19 @@ From Telegram message to final response:
 
 1. Poller receives message and applies auth checks.
 2. Poller calls AI backend through `runAI(...)`.
-3. Provider streams chunks, then returns final result.
-4. Response validator evaluates output quality.
-5. Failures are classified and tracked in analytics/self-heal.
-6. User gets final response or clear failure message.
-7. Provider auth prompts (for example `/login`) are suppressed and converted to a gateway error response.
+3. Response handler starts typing pulses and accumulates chunks.
+4. For private chats with topic mode, response handler sends throttled `sendMessageDraft` updates while text is generated.
+5. Response handler streams user-visible output via message send/edit flow and keeps replies in the incoming message thread when a `message_thread_id` exists.
+6. Provider returns final result, then response validator evaluates output quality.
+7. Failures are classified and tracked in analytics/self-heal.
+8. User gets final response or clear failure message.
+9. Provider auth prompts (for example `/login`) are suppressed and converted to a gateway error response.
+
+Draft notes:
+
+- Draft streaming is best-effort only.
+- If Telegram rejects a draft call, draft updates are disabled for that response and normal edit streaming continues.
+- This fallback does not interrupt final response delivery.
 
 ## Circuit Breaker Behavior
 
@@ -139,6 +147,38 @@ If things look unstable, this order saves time:
 3. circuit breaker state from `/session`.
 4. watchdog and self-heal logs.
 5. provider stderr snippets for root cause clues.
+
+## Auth Failure Handling
+
+Auth failures need special treatment because they are not recoverable by restarting sessions.
+
+**Degraded mode:**
+
+When auth is detected as broken, the gateway enters degraded mode. In this state:
+
+- `runClaude()` returns an error immediately without spawning a process.
+- `handleMessage()` and `processTextWithClaude()` reply with a user-friendly error and return.
+- Admin receives a critical alert.
+
+**Detection layers:**
+
+- Proactive: `checkAuthStatus()` runs `claude auth status --json` at startup and every 5 minutes.
+- Reactive: `markAuthFailureIfDetected()` in the session catches auth errors in response text (two-tier regex, only on short text to avoid false positives).
+- Watchdog: auth health check runs every 60 seconds as part of the watchdog cycle.
+- Self-heal: `auth_required` error pattern enters degraded mode instead of restarting.
+
+**Recovery:**
+
+Periodic auth check (5 minutes) and watchdog (60 seconds) both call `checkAuthStatus()`. When auth is restored (admin re-authenticates the CLI), the check succeeds, degraded mode exits, and the gateway resumes normal operation. An info-level alert confirms recovery.
+
+**Key files:**
+
+- `src/ai/auth-check.ts` - degraded mode state, proactive auth verification, periodic timer.
+- `src/ai/auth-failure.ts` - two-tier regex detection for response text.
+- `src/ai/providers/claude-cli.ts` - session-level detection + degraded mode guard in `runClaude()`.
+- `src/self-heal.ts` - `auth_required` pattern recovery.
+- `src/watchdog.ts` - `checkAuthHealth()` in watchdog cycle.
+- `src/index.ts` - startup check and periodic timer lifecycle.
 
 ## Safe Change Guidelines
 

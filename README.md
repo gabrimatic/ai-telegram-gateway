@@ -16,6 +16,8 @@ This project runs as a long-polling daemon on a trusted host machine. It gives y
 
 - Multiple AI providers with model routing (`claude-cli` and `codex-cli`)
 - Streaming responses via Telegram message edits
+- Draft streaming (`sendMessageDraft`) for topic-enabled private chats, with automatic fallback to standard edit streaming
+- Thread-aware replies: when a message arrives in a topic/thread, replies stay in the same thread
 - Voice input (WhisperKit STT) and optional voice output (OpenAI TTS)
 - In-chat schedule manager UI for listing and removing schedules
 - Visual command center (`/menu`) with inline buttons for command groups

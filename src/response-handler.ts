@@ -22,6 +22,15 @@ import {
 } from "./files";
 import { loadAllowlist, isAdminUser } from "./storage";
 
+type MessageWithTopicContext = Context["msg"] & {
+  message_thread_id?: number;
+  is_topic_message?: boolean;
+};
+
+function getTopicMessage(ctx: Context): MessageWithTopicContext | undefined {
+  return ctx.msg as MessageWithTopicContext | undefined;
+}
+
 /** Convert standard markdown to Telegram MarkdownV2 format */
 function toTelegramMarkdown(text: string): string {
   try {
@@ -44,8 +53,8 @@ function buildReplyOptions(
     result.link_preview_options = { is_disabled: true };
   }
 
-  const msg = ctx.msg as (Context["msg"] & { message_thread_id?: number }) | undefined;
-  if (msg?.message_thread_id) {
+  const msg = getTopicMessage(ctx);
+  if (typeof msg?.message_thread_id === "number" && msg.message_thread_id > 0) {
     result.message_thread_id = msg.message_thread_id;
   }
 
@@ -57,6 +66,22 @@ function buildReplyOptions(
   }
 
   return result;
+}
+
+function isDraftEligible(ctx: Context): boolean {
+  const msg = getTopicMessage(ctx);
+  if (!msg) return false;
+  if (ctx.chat?.type !== "private") return false;
+  return typeof msg.message_thread_id === "number" && msg.message_thread_id > 0;
+}
+
+function buildDraftOptions(ctx: Context, draftId: number): Record<string, unknown> {
+  const options: Record<string, unknown> = { draft_id: draftId };
+  const msg = getTopicMessage(ctx);
+  if (typeof msg?.message_thread_id === "number" && msg.message_thread_id > 0) {
+    options.message_thread_id = msg.message_thread_id;
+  }
+  return options;
 }
 
 /**
@@ -76,6 +101,12 @@ export class StreamingResponseHandler {
   private lastEditTime: number = 0;
   private pendingEditTimeout: NodeJS.Timeout | null = null;
   private editInProgress: Promise<void> | null = null;
+  private pendingDraftTimeout: NodeJS.Timeout | null = null;
+  private draftInProgress: Promise<void> | null = null;
+  private draftEnabled: boolean = false;
+  private draftId: number = 0;
+  private lastDraftText: string = "";
+  private lastDraftTime: number = 0;
   private accumulateOnly: boolean = false;
   private initialReplySent: boolean = false;
 
@@ -83,12 +114,16 @@ export class StreamingResponseHandler {
   private readonly TYPING_REFRESH_MS = 4500;
   private readonly TYPING_MIN_GAP_MS = 1000;
   private readonly EDIT_THROTTLE_MS = 2000;
+  private readonly DRAFT_THROTTLE_MS = 900;
   private readonly MAX_MESSAGE_LENGTH = 3500;
+  private readonly MAX_DRAFT_LENGTH = 4096;
   private readonly MAX_EDITS = 25;
 
   constructor(ctx: Context, options?: { accumulateOnly?: boolean }) {
     this.ctx = ctx;
     this.accumulateOnly = options?.accumulateOnly ?? false;
+    this.draftId = Math.max(1, Math.floor((Date.now() + Math.random() * 100000) % 2147483647));
+    this.draftEnabled = !this.accumulateOnly && isDraftEligible(ctx);
   }
 
   startTypingIndicator(): void {
@@ -183,6 +218,9 @@ export class StreamingResponseHandler {
       }
     }
 
+    // Schedule throttled draft updates for topic-enabled private chats.
+    this.scheduleDraft();
+
     // Schedule throttled edit
     this.scheduleEdit();
   }
@@ -193,6 +231,9 @@ export class StreamingResponseHandler {
     this.lastSentText = "";
     this.editCount = 0;
     this.lastEditTime = 0;
+    this.draftId = Math.max(1, Math.floor((Date.now() + Math.random() * 100000) % 2147483647));
+    this.lastDraftText = "";
+    this.lastDraftTime = 0;
   }
 
   private scheduleEdit(): void {
@@ -215,6 +256,30 @@ export class StreamingResponseHandler {
     // Don't prevent process exit during graceful shutdown
     if (this.pendingEditTimeout && typeof this.pendingEditTimeout.unref === "function") {
       this.pendingEditTimeout.unref();
+    }
+  }
+
+  private scheduleDraft(): void {
+    if (!this.draftEnabled) return;
+
+    if (this.pendingDraftTimeout) {
+      clearTimeout(this.pendingDraftTimeout);
+    }
+
+    const now = Date.now();
+    const timeSinceLastDraft = now - this.lastDraftTime;
+    const delay = Math.max(0, this.DRAFT_THROTTLE_MS - timeSinceLastDraft);
+
+    this.pendingDraftTimeout = setTimeout(() => {
+      this.performDraft().catch((err) => {
+        logError("streaming", "scheduled_draft_failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, delay);
+
+    if (this.pendingDraftTimeout && typeof this.pendingDraftTimeout.unref === "function") {
+      this.pendingDraftTimeout.unref();
     }
   }
 
@@ -286,6 +351,7 @@ export class StreamingResponseHandler {
     }
 
     // Flush latest accumulated content before any rollover/finalization.
+    await this.performDraft(true);
     await this.performEdit();
   }
 
@@ -295,8 +361,13 @@ export class StreamingResponseHandler {
       clearTimeout(this.pendingEditTimeout);
       this.pendingEditTimeout = null;
     }
+    if (this.pendingDraftTimeout) {
+      clearTimeout(this.pendingDraftTimeout);
+      this.pendingDraftTimeout = null;
+    }
 
     // Perform final edit
+    await this.performDraft(true);
     await this.performEdit();
 
     // Process any <send-file> tags in the accumulated text
@@ -304,6 +375,52 @@ export class StreamingResponseHandler {
 
     // Cleanup
     this.cleanup();
+  }
+
+  private async performDraft(force: boolean = false): Promise<void> {
+    if (!this.draftEnabled) return;
+
+    if (this.draftInProgress) {
+      await this.draftInProgress;
+    }
+
+    if (!this.accumulatedText) return;
+
+    if (!force) {
+      const now = Date.now();
+      if (now - this.lastDraftTime < this.DRAFT_THROTTLE_MS) return;
+    }
+
+    this.draftInProgress = this.doPerformDraft();
+    await this.draftInProgress;
+    this.draftInProgress = null;
+  }
+
+  private async doPerformDraft(): Promise<void> {
+    if (!this.draftEnabled) return;
+
+    const safeText = this.accumulatedText.length <= this.MAX_DRAFT_LENGTH
+      ? this.accumulatedText
+      : `${this.accumulatedText.slice(0, this.MAX_DRAFT_LENGTH - 3)}...`;
+
+    if (!safeText || safeText === this.lastDraftText) {
+      return;
+    }
+
+    try {
+      await this.withRetry(() => this.ctx.replyWithDraft(safeText, buildDraftOptions(this.ctx, this.draftId) as any));
+      this.lastDraftText = safeText;
+      this.lastDraftTime = Date.now();
+      debug("streaming", "draft_updated", { draftId: this.draftId, length: safeText.length });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      // Draft streaming is best effort. Disable it and continue normal edit-stream flow.
+      this.draftEnabled = false;
+      logError("streaming", "draft_disabled_after_error", {
+        error: errMsg,
+        draftId: this.draftId,
+      });
+    }
   }
 
   /**
@@ -528,6 +645,10 @@ export class StreamingResponseHandler {
     if (this.pendingEditTimeout) {
       clearTimeout(this.pendingEditTimeout);
       this.pendingEditTimeout = null;
+    }
+    if (this.pendingDraftTimeout) {
+      clearTimeout(this.pendingDraftTimeout);
+      this.pendingDraftTimeout = null;
     }
   }
 
