@@ -68,6 +68,15 @@ const STORE_LOCK_TIMEOUT_MS = 5_000;
 const STORE_LOCK_RETRY_MS = 25;
 const STORE_LOCK_STALE_MS = 30_000;
 const TIMEZONE = "Europe/Berlin";
+const RANDOM_CHECKIN_MASTER_TASK = "__tg_random_checkin_master__";
+const RANDOM_CHECKIN_MESSAGE_PREFIX = "__tg_random_checkin_message__";
+const RANDOM_CHECKIN_DAILY_CRON = "5 0 * * *";
+const RANDOM_CHECKIN_MAX_MESSAGES_PER_DAY = 10;
+const RANDOM_CHECKIN_MIN_GAP_MINUTES = 60;
+const RANDOM_CHECKIN_DAY_START_MINUTES = 8 * 60;
+const RANDOM_CHECKIN_DAY_END_MINUTES = 23 * 60; // 23:00 exclusive
+const RANDOM_CHECKIN_MIN_LEAD_MINUTES = 5;
+const RANDOM_CHECKIN_MAX_TELEGRAM_CHARS = 220;
 
 // --- State ---
 
@@ -304,6 +313,500 @@ export function createSchedule(input: CreateScheduleInput): Schedule {
   });
 }
 
+export interface RandomCheckinStatus {
+  enabled: boolean;
+  masterId?: number;
+  activeMessageCount: number;
+}
+
+export interface RandomCheckinEnableResult {
+  createdMaster: boolean;
+  masterId: number;
+  generatedToday: number;
+  dateKey: string;
+  skippedReason?: string;
+}
+
+export interface RandomCheckinDisableResult {
+  cancelledMasters: number;
+  cancelledMessages: number;
+}
+
+export interface RandomCheckinRegenerateResult {
+  generated: number;
+  dateKey: string;
+  skippedReason?: string;
+}
+
+interface BerlinDateParts {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+}
+
+interface RandomCheckinTaskPayload {
+  dateKey: string;
+  slot: number;
+  prompt: string;
+}
+
+function pad2(value: number): string {
+  return value.toString().padStart(2, "0");
+}
+
+function getBerlinDateParts(date: Date = new Date()): BerlinDateParts {
+  const formatter = new Intl.DateTimeFormat("en-GB", {
+    timeZone: TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(date);
+  const getPart = (type: Intl.DateTimeFormatPartTypes): number => {
+    const value = parts.find((part) => part.type === type)?.value;
+    return value ? Number(value) : 0;
+  };
+  return {
+    year: getPart("year"),
+    month: getPart("month"),
+    day: getPart("day"),
+    hour: getPart("hour"),
+    minute: getPart("minute"),
+    second: getPart("second"),
+  };
+}
+
+function toBerlinDateKey(parts: BerlinDateParts): string {
+  return `${parts.year}-${pad2(parts.month)}-${pad2(parts.day)}`;
+}
+
+function getTimezoneOffsetMinutes(date: Date, timeZone: string): number {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(date);
+  const getPart = (type: Intl.DateTimeFormatPartTypes): number => {
+    const value = parts.find((part) => part.type === type)?.value;
+    return value ? Number(value) : 0;
+  };
+  const reconstructedUtcMs = Date.UTC(
+    getPart("year"),
+    getPart("month") - 1,
+    getPart("day"),
+    getPart("hour"),
+    getPart("minute"),
+    getPart("second")
+  );
+  return Math.round((reconstructedUtcMs - date.getTime()) / 60000);
+}
+
+function berlinLocalDateToIso(parts: BerlinDateParts, minuteOfDay: number): string {
+  const hour = Math.floor(minuteOfDay / 60);
+  const minute = minuteOfDay % 60;
+  const utcGuessMs = Date.UTC(parts.year, parts.month - 1, parts.day, hour, minute, 0);
+
+  const firstOffset = getTimezoneOffsetMinutes(new Date(utcGuessMs), TIMEZONE);
+  let timestamp = utcGuessMs - firstOffset * 60_000;
+
+  const secondOffset = getTimezoneOffsetMinutes(new Date(timestamp), TIMEZONE);
+  if (secondOffset !== firstOffset) {
+    timestamp = utcGuessMs - secondOffset * 60_000;
+  }
+
+  return new Date(timestamp).toISOString();
+}
+
+function randomIntInclusive(min: number, max: number): number {
+  if (max <= min) return min;
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function getMaxSlotCount(startMinute: number, endMinuteExclusive: number, minGapMinutes: number): number {
+  const span = endMinuteExclusive - startMinute;
+  if (span <= 0) return 0;
+  return 1 + Math.floor((span - 1) / minGapMinutes);
+}
+
+function generateRandomMinutes(
+  startMinute: number,
+  endMinuteExclusive: number,
+  count: number,
+  minGapMinutes: number
+): number[] {
+  const slots: number[] = [];
+  let cursor = startMinute;
+
+  for (let index = 0; index < count; index++) {
+    const remaining = count - index - 1;
+    const latestMinute = endMinuteExclusive - (remaining * minGapMinutes) - 1;
+    if (latestMinute < cursor) break;
+
+    const picked = randomIntInclusive(cursor, latestMinute);
+    slots.push(picked);
+    cursor = picked + minGapMinutes;
+  }
+
+  return slots;
+}
+
+function berlinMinuteOfDayFromIso(iso?: string): number | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  const parts = getBerlinDateParts(date);
+  return (parts.hour * 60) + parts.minute;
+}
+
+function buildRandomCheckinPrompt(slot: number, total: number): string {
+  return [
+    `Send one short check-in message (${slot}/${total}) for the user.`,
+    "",
+    "Hard rules:",
+    "- Keep it friendly and useful.",
+    "- Maximum 30 words.",
+    "- Return plain text only (single message, no markdown).",
+    "- Use only facts you can verify from tools/context available right now.",
+    "- Prefer context like calendar, fresh email updates via gog, web data, Berlin local time, weather, and upcoming events when available.",
+    "- If external data is unavailable, give a practical short nudge based on Berlin time of day.",
+  ].join("\n");
+}
+
+function buildRandomCheckinTask(dateKey: string, slot: number, prompt: string): string {
+  return `${RANDOM_CHECKIN_MESSAGE_PREFIX}|${dateKey}|${slot}|${prompt}`;
+}
+
+function parseRandomCheckinTask(task: string): RandomCheckinTaskPayload | null {
+  if (!task.startsWith(`${RANDOM_CHECKIN_MESSAGE_PREFIX}|`)) {
+    return null;
+  }
+  const parts = task.split("|");
+  if (parts.length < 4) {
+    return null;
+  }
+  const slot = Number(parts[2]);
+  if (!Number.isInteger(slot) || slot <= 0) {
+    return null;
+  }
+  return {
+    dateKey: parts[1],
+    slot,
+    prompt: parts.slice(3).join("|"),
+  };
+}
+
+function isRandomCheckinMasterTask(task: string): boolean {
+  return task.trim() === RANDOM_CHECKIN_MASTER_TASK;
+}
+
+function isRandomCheckinMessageTask(task: string): boolean {
+  return parseRandomCheckinTask(task) !== null;
+}
+
+function getTaskPromptForExecution(task: string): string {
+  const payload = parseRandomCheckinTask(task);
+  if (!payload) return task;
+  return payload.prompt;
+}
+
+function buildRandomCheckinDisplayName(slot: number, total: number): string {
+  return `Random check-in ${slot}/${total}`;
+}
+
+function scheduleRuntime(schedule: Schedule): void {
+  if (schedule.status !== "active") return;
+  if (schedule.type === "cron") {
+    scheduleCronTask(schedule);
+  } else if (schedule.type === "once") {
+    scheduleOnceTask(schedule);
+  }
+}
+
+interface InternalRandomCheckinGenerationResult {
+  createdSchedules: Schedule[];
+  generated: number;
+  dateKey: string;
+  skippedReason?: string;
+}
+
+function generateRandomCheckinsForDate(
+  userId: string,
+  dateParts: BerlinDateParts,
+  startMinute: number
+): InternalRandomCheckinGenerationResult {
+  const dateKey = toBerlinDateKey(dateParts);
+  const nowMs = Date.now();
+
+  const mutationResult = mutateSchedules((store) => {
+    let completedCount = 0;
+    let lastCompletedMinute: number | null = null;
+
+    for (const existing of store.schedules) {
+      if (existing.userId !== userId) continue;
+      const payload = parseRandomCheckinTask(existing.task);
+      if (!payload || payload.dateKey !== dateKey) continue;
+
+      if (existing.status === "completed") {
+        completedCount++;
+        const minute = berlinMinuteOfDayFromIso(existing.scheduledTime ?? existing.lastRun);
+        if (minute !== null) {
+          lastCompletedMinute = lastCompletedMinute === null
+            ? minute
+            : Math.max(lastCompletedMinute, minute);
+        }
+      }
+
+      if (existing.status === "active") {
+        stopScheduleRuntime(existing.id);
+        existing.status = "cancelled";
+        existing.nextRun = undefined;
+      }
+    }
+
+    const remainingQuota = Math.max(RANDOM_CHECKIN_MAX_MESSAGES_PER_DAY - completedCount, 0);
+    if (remainingQuota <= 0) {
+      return {
+        createdSchedules: [] as Schedule[],
+        skippedReason: `Daily limit already reached (${completedCount}/${RANDOM_CHECKIN_MAX_MESSAGES_PER_DAY}).`,
+      };
+    }
+
+    let effectiveStart = Math.max(startMinute, RANDOM_CHECKIN_DAY_START_MINUTES);
+    if (lastCompletedMinute !== null) {
+      effectiveStart = Math.max(
+        effectiveStart,
+        lastCompletedMinute + RANDOM_CHECKIN_MIN_GAP_MINUTES
+      );
+    }
+
+    const maxAllowedByWindow = getMaxSlotCount(
+      effectiveStart,
+      RANDOM_CHECKIN_DAY_END_MINUTES,
+      RANDOM_CHECKIN_MIN_GAP_MINUTES
+    );
+    const maxCount = Math.min(maxAllowedByWindow, remainingQuota);
+
+    if (maxCount <= 0) {
+      return {
+        createdSchedules: [] as Schedule[],
+        skippedReason: "No valid times left today that satisfy spacing and cutoff rules.",
+      };
+    }
+
+    const minCount = Math.min(4, maxCount);
+    const targetCount = randomIntInclusive(minCount, maxCount);
+    const minuteSlots = generateRandomMinutes(
+      effectiveStart,
+      RANDOM_CHECKIN_DAY_END_MINUTES,
+      targetCount,
+      RANDOM_CHECKIN_MIN_GAP_MINUTES
+    );
+
+    if (minuteSlots.length === 0) {
+      return {
+        createdSchedules: [] as Schedule[],
+        skippedReason: "Could not generate valid random slots.",
+      };
+    }
+
+    const schedulesToCreate = minuteSlots
+      .map((minute, index) => {
+        const scheduledTime = berlinLocalDateToIso(dateParts, minute);
+        if (new Date(scheduledTime).getTime() <= nowMs) {
+          return null;
+        }
+        return {
+          scheduledTime,
+          slot: index + 1,
+        };
+      })
+      .filter((entry): entry is { scheduledTime: string; slot: number } => entry !== null);
+
+    if (schedulesToCreate.length === 0) {
+      return {
+        createdSchedules: [] as Schedule[],
+        skippedReason: "Generated times are already in the past.",
+      };
+    }
+
+    const generated: Schedule[] = [];
+    for (const entry of schedulesToCreate) {
+      const schedule: Schedule = {
+        id: store.nextId++,
+        type: "once",
+        jobType: "prompt",
+        task: buildRandomCheckinTask(
+          dateKey,
+          entry.slot,
+          buildRandomCheckinPrompt(entry.slot, schedulesToCreate.length)
+        ),
+        output: "telegram",
+        status: "active",
+        createdAt: new Date().toISOString(),
+        userId,
+        history: [],
+        name: buildRandomCheckinDisplayName(entry.slot, schedulesToCreate.length),
+        scheduledTime: entry.scheduledTime,
+        nextRun: entry.scheduledTime,
+      };
+      store.schedules.push(schedule);
+      generated.push(schedule);
+    }
+
+    return { createdSchedules: generated as Schedule[] };
+  });
+
+  const createdSchedules = mutationResult.createdSchedules;
+
+  for (const schedule of createdSchedules) {
+    scheduleRuntime(schedule);
+  }
+
+  return {
+    createdSchedules,
+    generated: createdSchedules.length,
+    dateKey,
+    skippedReason: mutationResult.skippedReason,
+  };
+}
+
+function ensureRandomCheckinMaster(userId: string): { master: Schedule; created: boolean } {
+  const result = mutateSchedules((store) => {
+    const activeMasters = store.schedules
+      .filter((schedule) => schedule.userId === userId
+        && schedule.status === "active"
+        && isRandomCheckinMasterTask(schedule.task))
+      .sort((a, b) => a.id - b.id);
+
+    if (activeMasters.length > 0) {
+      const [primary, ...duplicates] = activeMasters;
+      for (const duplicate of duplicates) {
+        stopScheduleRuntime(duplicate.id);
+        duplicate.status = "cancelled";
+        duplicate.nextRun = undefined;
+      }
+      return { master: primary, created: false };
+    }
+
+    const created: Schedule = {
+      id: store.nextId++,
+      type: "cron",
+      jobType: "prompt",
+      task: RANDOM_CHECKIN_MASTER_TASK,
+      output: "silent",
+      status: "active",
+      createdAt: new Date().toISOString(),
+      userId,
+      history: [],
+      name: "Random check-ins daily planner",
+      cronExpression: RANDOM_CHECKIN_DAILY_CRON,
+    };
+    store.schedules.push(created);
+    return { master: created, created: true };
+  });
+
+  scheduleRuntime(result.master);
+  return result;
+}
+
+export function isRandomCheckinMasterSchedule(schedule: Schedule): boolean {
+  return isRandomCheckinMasterTask(schedule.task);
+}
+
+export function isRandomCheckinMessageSchedule(schedule: Schedule): boolean {
+  return isRandomCheckinMessageTask(schedule.task);
+}
+
+export function getRandomCheckinStatus(userId: string): RandomCheckinStatus {
+  const store = loadSchedules();
+  const activeSchedules = store.schedules.filter((schedule) => schedule.userId === userId && schedule.status === "active");
+  const master = activeSchedules.find((schedule) => isRandomCheckinMasterTask(schedule.task));
+  const activeMessageCount = activeSchedules.filter((schedule) => isRandomCheckinMessageTask(schedule.task)).length;
+  return {
+    enabled: Boolean(master),
+    masterId: master?.id,
+    activeMessageCount,
+  };
+}
+
+export function regenerateRandomCheckinsForToday(userId: string): RandomCheckinRegenerateResult {
+  const berlinNow = getBerlinDateParts();
+  const startMinute = (berlinNow.hour * 60) + berlinNow.minute + RANDOM_CHECKIN_MIN_LEAD_MINUTES;
+  const result = generateRandomCheckinsForDate(userId, berlinNow, startMinute);
+  info("task-scheduler", "random_checkins_regenerated", {
+    userId,
+    date: result.dateKey,
+    generated: result.generated,
+    reason: result.skippedReason,
+  });
+  return {
+    generated: result.generated,
+    dateKey: result.dateKey,
+    skippedReason: result.skippedReason,
+  };
+}
+
+export function enableRandomCheckins(userId: string): RandomCheckinEnableResult {
+  const { master, created } = ensureRandomCheckinMaster(userId);
+  const regenerated = regenerateRandomCheckinsForToday(userId);
+  return {
+    createdMaster: created,
+    masterId: master.id,
+    generatedToday: regenerated.generated,
+    dateKey: regenerated.dateKey,
+    skippedReason: regenerated.skippedReason,
+  };
+}
+
+export function disableRandomCheckins(userId: string): RandomCheckinDisableResult {
+  const idsToStop: number[] = [];
+  const result = mutateSchedules((store) => {
+    let cancelledMasters = 0;
+    let cancelledMessages = 0;
+    for (const schedule of store.schedules) {
+      if (schedule.userId !== userId || schedule.status !== "active") continue;
+      if (isRandomCheckinMasterTask(schedule.task)) {
+        schedule.status = "cancelled";
+        schedule.nextRun = undefined;
+        idsToStop.push(schedule.id);
+        cancelledMasters++;
+        continue;
+      }
+      if (isRandomCheckinMessageTask(schedule.task)) {
+        schedule.status = "cancelled";
+        schedule.nextRun = undefined;
+        idsToStop.push(schedule.id);
+        cancelledMessages++;
+      }
+    }
+    return { cancelledMasters, cancelledMessages };
+  });
+
+  for (const scheduleId of idsToStop) {
+    stopScheduleRuntime(scheduleId);
+  }
+
+  info("task-scheduler", "random_checkins_disabled", {
+    userId,
+    cancelledMasters: result.cancelledMasters,
+    cancelledMessages: result.cancelledMessages,
+  });
+  return result;
+}
+
 // --- Claude CLI execution ---
 
 interface StreamMessage {
@@ -477,6 +980,22 @@ async function executeScriptTask(scriptPath: string): Promise<{ output: string; 
   return executeShellTask(command);
 }
 
+async function executeRandomCheckinPlannerTask(userId: string): Promise<{ output: string; success: boolean }> {
+  const regenerated = regenerateRandomCheckinsForToday(userId);
+  if (regenerated.generated > 0) {
+    return {
+      output: `Generated ${regenerated.generated} random check-ins for ${regenerated.dateKey}.`,
+      success: true,
+    };
+  }
+  return {
+    output: regenerated.skippedReason
+      ? `Skipped random check-in generation for ${regenerated.dateKey}: ${regenerated.skippedReason}`
+      : `No random check-ins generated for ${regenerated.dateKey}.`,
+    success: true,
+  };
+}
+
 // --- Output routing ---
 
 /**
@@ -498,7 +1017,16 @@ async function routeOutput(
 
   if (outputTarget === "telegram") {
     if (notifyUser) {
-      await notifyUser(schedule.userId, message).catch(() => {});
+      if (isRandomCheckinMessageTask(schedule.task) && success) {
+        const compactMessage = taskOutput
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, RANDOM_CHECKIN_MAX_TELEGRAM_CHARS)
+          || "Quick check-in: take one small step on your top priority now.";
+        await notifyUser(schedule.userId, compactMessage).catch(() => {});
+      } else {
+        await notifyUser(schedule.userId, message).catch(() => {});
+      }
     }
   } else if (outputTarget === "silent") {
     // Log only, no notification
@@ -546,6 +1074,8 @@ async function runScheduledTask(schedule: Schedule): Promise<void> {
   const startTime = Date.now();
   const outputTarget = schedule.output ?? "telegram";
   const displayName = schedule.name ? ` (${schedule.name})` : "";
+  const isRandomMaster = isRandomCheckinMasterTask(schedule.task);
+  const isRandomMessage = isRandomCheckinMessageTask(schedule.task);
 
   info("task-scheduler", "task_starting", {
     id: schedule.id,
@@ -554,7 +1084,7 @@ async function runScheduledTask(schedule: Schedule): Promise<void> {
   });
 
   // Notify user that task is starting (unless silent)
-  if (notifyUser && outputTarget !== "silent") {
+  if (notifyUser && outputTarget !== "silent" && !isRandomMaster && !isRandomMessage) {
     await notifyUser(
       schedule.userId,
       `\u23F3 Scheduled task #${schedule.id}${displayName} starting: ${schedule.task}`
@@ -564,18 +1094,22 @@ async function runScheduledTask(schedule: Schedule): Promise<void> {
   try {
     // Dispatch based on jobType
     let result: { output: string; success: boolean };
-    const jobType = schedule.jobType ?? "prompt";
-    switch (jobType) {
-      case "shell":
-        result = await executeShellTask(schedule.task);
-        break;
-      case "script":
-        result = await executeScriptTask(schedule.task);
-        break;
-      case "prompt":
-      default:
-        result = await executeClaudeTask(schedule.task);
-        break;
+    if (isRandomMaster) {
+      result = await executeRandomCheckinPlannerTask(schedule.userId);
+    } else {
+      const jobType = schedule.jobType ?? "prompt";
+      switch (jobType) {
+        case "shell":
+          result = await executeShellTask(schedule.task);
+          break;
+        case "script":
+          result = await executeScriptTask(schedule.task);
+          break;
+        case "prompt":
+        default:
+          result = await executeClaudeTask(getTaskPromptForExecution(schedule.task));
+          break;
+      }
     }
 
     const { output, success } = result;
@@ -667,7 +1201,7 @@ async function runScheduledTask(schedule: Schedule): Promise<void> {
       }
     });
 
-    if (notifyUser) {
+    if (notifyUser && !isRandomMaster && !isRandomMessage) {
       await notifyUser(
         schedule.userId,
         `\u274C Task #${schedule.id}${displayName} failed: ${errorMsg}`

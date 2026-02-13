@@ -181,11 +181,16 @@ Subcommands:
 
 ### `/schedule`
 
-Shows schedules overview (same as `/schedules` fallback).
+Opens in-chat schedule manager UI with buttons for:
+
+- active schedule list
+- inactive schedule list
+- removing active schedules
+- random check-in preset controls
 
 ### `/schedules`
 
-Shows active schedules and recent inactive schedules.
+Alias for `/schedule` (same in-chat manager UI).
 
 ### `/schedule cancel <id>`
 
@@ -195,6 +200,15 @@ Cancels active schedule by ID.
 
 - No ID: compact history summary across schedules.
 - With ID: detailed history for one schedule.
+
+### `/schedule checkins [status|on|off|regen]`
+
+Manages the predefined random check-in preset:
+
+- `status`: current preset state and queued count.
+- `on`: enables daily planner and generates today’s random one-time check-ins.
+- `off`: disables planner and cancels queued check-ins.
+- `regen`: rebuilds today’s random check-in slots.
 
 ## Heartbeat Commands
 

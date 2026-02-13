@@ -208,18 +208,9 @@ Current repo config (`config/gateway.json`) sets:
 - `activeHoursEnd: 23`
 - `timezone: "Europe/Berlin"`
 
-## upstream Concepts This Implementation Follows
+## Design Decisions
 
-From upstream heartbeat docs, the concepts relevant to this codebase are:
-- Heartbeat runs periodic turns in the main session.
-- `HEARTBEAT.md` can define checklist behavior.
-- `HEARTBEAT_OK` is used as ack token for suppression behavior.
-- Active-hour windows can skip beats outside local time window.
-- Heartbeat is cost-sensitive because each beat is a real model turn.
-
-upstream also documents richer heartbeat options (for example per-channel delivery controls, account-level overrides, model override, reasoning delivery). Those are upstream platform capabilities, not all are implemented in this gateway codebase.
-
-This repository intentionally does not implement heartbeat-specific model override. `src/heartbeat.ts` documents that switching model would restart the Claude session and lose the context heartbeat is designed to leverage.
+This implementation intentionally does not support heartbeat-specific model override. Switching the model would restart the Claude session and lose the conversation context that heartbeat is designed to leverage.
 
 ## Practical Usage Guidance for This Repo
 

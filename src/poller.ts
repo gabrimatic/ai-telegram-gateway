@@ -112,6 +112,7 @@ import {
   handleRebootConfirmCallback,
   handleRebootCancelCallback,
   handleAIActionCallback,
+  handleScheduleCallback,
 } from "./callbacks";
 
 async function attachActionKeyboard(ctx: Context, messageId: number, token: string): Promise<void> {
@@ -844,8 +845,8 @@ export async function createBot(
       { command: "start", description: "Open quick actions" },
       { command: "help", description: "Show all commands" },
       { command: "model", description: "Switch AI model" },
-      { command: "schedule", description: "View scheduled tasks" },
-      { command: "schedules", description: "List all schedules" },
+      { command: "schedule", description: "Open schedule manager" },
+      { command: "schedules", description: "Open schedule manager" },
       { command: "timer", description: "Quick countdown timer" },
       { command: "weather", description: "Weather info" },
       { command: "translate", description: "Translate text" },
@@ -908,6 +909,7 @@ export async function createBot(
   bot.callbackQuery(/^session_(status|kill|new)$/, handleSessionCallback);
   bot.callbackQuery("reboot_confirm", handleRebootConfirmCallback);
   bot.callbackQuery("reboot_cancel", handleRebootCancelCallback);
+  bot.callbackQuery(/^sched_.+$/, handleScheduleCallback);
   bot.callbackQuery(/^ai_(regen|short|deep)_[a-z0-9]+$/, handleAIActionCallback);
 
   // Catch-all handler to prevent loading spinners on unknown callbacks

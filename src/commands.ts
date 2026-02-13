@@ -49,11 +49,14 @@ import {
 } from "./tts";
 import {
   cancelSchedule,
+  disableRandomCheckins,
   getSchedules,
+  getRandomCheckinStatus,
   getScheduleById,
-  formatSchedule,
+  enableRandomCheckins,
   formatHistory,
   createSchedule,
+  regenerateRandomCheckinsForToday,
   reloadSchedules,
 } from "./task-scheduler";
 import { getTodayStats, getWeekStats, getMonthStats, formatAnalytics, getErrorRate } from "./analytics";
@@ -73,6 +76,7 @@ import {
   createDefaultHeartbeatMd,
 } from "./heartbeat";
 import { env } from "./env";
+import { buildScheduleHomeView } from "./schedule-ui";
 
 const DANGEROUS_COMMANDS = new Set(["sh", "reboot"]);
 const ADMIN_ONLY_COMMANDS = new Set([
@@ -155,8 +159,9 @@ export function buildHelpText(options: {
   }
 
   lines.push("\uD83D\uDCCB *PRODUCTIVITY*");
-  lines.push("/schedule /schedules - Manage scheduled tasks");
+  lines.push("/schedule /schedules - Manage schedules in chat (list/remove)");
   lines.push("/timer - Quick countdown timer");
+  lines.push("/schedule checkins - Random daily check-ins preset");
   lines.push("/todo /remind - Scheduler-backed productivity helpers");
   lines.push("");
   lines.push(`\uD83C\uDF10 *INFO* _(${safeProvider}-powered)_`);
@@ -750,7 +755,7 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
     // ============ TASK SCHEDULER COMMANDS ============
 
     case "schedule": {
-      const parts = args.trim().split(/\s+/);
+      const parts = args.trim() ? args.trim().split(/\s+/) : [];
       const subcommand = parts[0]?.toLowerCase() || "";
 
       // /schedule cancel <id>
@@ -793,25 +798,66 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
         return true;
       }
 
-      // /schedule (no args or unknown subcommand) - fall through to schedules
+      // /schedule checkins [status|on|off|regen]
+      if (subcommand === "checkins" || subcommand === "checkin") {
+        const action = parts[1]?.toLowerCase() || "status";
+        const status = getRandomCheckinStatus(userId!);
+
+        if (action === "status") {
+          const statusText = status.enabled
+            ? `ON (planner #${status.masterId}, ${status.activeMessageCount} queued today)`
+            : "OFF";
+          await ctx.reply(
+            `🎲 Random check-ins: ${statusText}\n\n` +
+            `Use \`/schedule checkins on\`, \`/schedule checkins off\`, or \`/schedule checkins regen\`.`,
+            { parse_mode: "Markdown" }
+          );
+          return true;
+        }
+
+        if (action === "on" || action === "enable") {
+          const result = enableRandomCheckins(userId!);
+          const generationLine = result.generatedToday > 0
+            ? `Generated ${result.generatedToday} check-ins for ${result.dateKey}.`
+            : `No check-ins generated for ${result.dateKey}${result.skippedReason ? ` (${result.skippedReason})` : "."}`;
+          await ctx.reply(
+            `✅ Random check-ins enabled (planner #${result.masterId}).\n${generationLine}`
+          );
+          return true;
+        }
+
+        if (action === "off" || action === "disable") {
+          const result = disableRandomCheckins(userId!);
+          await ctx.reply(
+            `🛑 Random check-ins disabled. Cancelled ${result.cancelledMessages} queued check-in(s).`
+          );
+          return true;
+        }
+
+        if (action === "regen" || action === "regenerate" || action === "refresh") {
+          const result = regenerateRandomCheckinsForToday(userId!);
+          const summary = result.generated > 0
+            ? `🎲 Regenerated ${result.generated} check-ins for ${result.dateKey}.`
+            : `No check-ins generated for ${result.dateKey}${result.skippedReason ? ` (${result.skippedReason})` : "."}`;
+          await ctx.reply(summary);
+          return true;
+        }
+
+        await ctx.reply(
+          `${ICONS.error} Usage: \`/schedule checkins [status|on|off|regen]\``,
+          { parse_mode: "Markdown" }
+        );
+        return true;
+      }
+
+      const view = buildScheduleHomeView(userId!);
+      await ctx.reply(view.text, { reply_markup: view.keyboard });
+      return true;
     }
 
     case "schedules": {
-      const schedules = getSchedules(userId!);
-      if (schedules.length === 0) {
-        await ctx.reply("\u{1F4C5} No schedules yet! Just ask me to schedule something.");
-        return true;
-      }
-      const active = schedules.filter((s) => s.status === "active");
-      const inactive = schedules.filter((s) => s.status !== "active");
-      let msg = `\u{1F4C5} *Your Schedules*\n\n`;
-      if (active.length > 0) {
-        msg += `*Active (${active.length}):*\n` + active.map(formatSchedule).join("\n\n") + "\n\n";
-      }
-      if (inactive.length > 0) {
-        msg += `*Completed/Cancelled (${Math.min(inactive.length, 5)}):*\n` + inactive.slice(0, 5).map(formatSchedule).join("\n\n");
-      }
-      await ctx.reply(msg, { parse_mode: "Markdown" });
+      const view = buildScheduleHomeView(userId!);
+      await ctx.reply(view.text, { reply_markup: view.keyboard });
       return true;
     }
 

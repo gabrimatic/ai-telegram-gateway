@@ -13,7 +13,14 @@ import { loadMemoryContext } from "./memory";
 import { getConfiguredProviderName, getProviderDisplayName, getProviderProcessConfig } from "./provider";
 import { ICONS } from "./constants";
 import { formatDuration, formatUptime, safeExec } from "./utils";
-import { createSchedule, reloadSchedules } from "./task-scheduler";
+import {
+  cancelSchedule,
+  createSchedule,
+  disableRandomCheckins,
+  enableRandomCheckins,
+  regenerateRandomCheckinsForToday,
+  reloadSchedules,
+} from "./task-scheduler";
 import { env } from "./env";
 import { loadAllowlist, isAdminUser, isUserAllowed } from "./storage";
 import { buildHelpKeyboard, buildHelpText } from "./commands";
@@ -24,6 +31,12 @@ import {
   buildActionPrompt,
   buildActionKeyboard,
 } from "./interactive-actions";
+import {
+  buildScheduleHomeView,
+  buildScheduleListView,
+  buildScheduleRemoveConfirmView,
+  buildScheduleRemoveView,
+} from "./schedule-ui";
 
 async function isAllowedCallbackUser(ctx: CallbackQueryContext<Context>): Promise<boolean> {
   const userId = ctx.from?.id?.toString();
@@ -53,6 +66,21 @@ function withSystemPrompt(prompt: string): string {
     providerDisplayName: config.providerDisplayName,
   });
   return wrapWithSystemPrompt(systemPrompt, prompt);
+}
+
+async function editCallbackMessage(
+  ctx: CallbackQueryContext<Context>,
+  text: string,
+  keyboard: InlineKeyboard
+): Promise<void> {
+  try {
+    await ctx.editMessageText(text, { reply_markup: keyboard });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!message.includes("message is not modified")) {
+      throw err;
+    }
+  }
 }
 
 export async function handleTimerCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
@@ -220,6 +248,121 @@ export async function handleTimerMenuCallback(ctx: CallbackQueryContext<Context>
     });
   }
   await ctx.answerCallbackQuery();
+}
+
+export async function handleScheduleCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
+  let callbackMessage: string | undefined;
+  try {
+    if (!(await isAllowedCallbackUser(ctx))) {
+      await ctx.answerCallbackQuery("Not authorized");
+      return;
+    }
+
+    const userId = ctx.from?.id?.toString();
+    if (!userId) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const data = ctx.callbackQuery.data;
+
+    if (data === "sched_home") {
+      const view = buildScheduleHomeView(userId);
+      await editCallbackMessage(ctx, view.text, view.keyboard);
+      callbackMessage = "Schedule manager updated";
+      await ctx.answerCallbackQuery(callbackMessage);
+      return;
+    }
+
+    const listMatch = data.match(/^sched_view_(active|inactive)_(\d+)$/);
+    if (listMatch) {
+      const view = buildScheduleListView(
+        userId,
+        listMatch[1] as "active" | "inactive",
+        Number.parseInt(listMatch[2], 10)
+      );
+      await editCallbackMessage(ctx, view.text, view.keyboard);
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const removeMatch = data.match(/^sched_remove_(\d+)$/);
+    if (removeMatch) {
+      const view = buildScheduleRemoveView(
+        userId,
+        Number.parseInt(removeMatch[1], 10)
+      );
+      await editCallbackMessage(ctx, view.text, view.keyboard);
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const removeConfirmMatch = data.match(/^sched_rm_id_(\d+)_(\d+)$/);
+    if (removeConfirmMatch) {
+      const scheduleId = Number.parseInt(removeConfirmMatch[1], 10);
+      const page = Number.parseInt(removeConfirmMatch[2], 10);
+      const view = buildScheduleRemoveConfirmView(userId, scheduleId, page);
+      await editCallbackMessage(ctx, view.text, view.keyboard);
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const removeAcceptMatch = data.match(/^sched_rm_ok_(\d+)_(\d+)$/);
+    if (removeAcceptMatch) {
+      const scheduleId = Number.parseInt(removeAcceptMatch[1], 10);
+      const page = Number.parseInt(removeAcceptMatch[2], 10);
+      const result = cancelSchedule(scheduleId, userId);
+      const notice = result.success ? `✅ ${result.message}` : `⚠️ ${result.message}`;
+      const view = buildScheduleRemoveView(userId, page, notice);
+      await editCallbackMessage(ctx, view.text, view.keyboard);
+      callbackMessage = result.success ? "Schedule removed" : "Could not remove";
+      await ctx.answerCallbackQuery(callbackMessage);
+      return;
+    }
+
+    if (data === "sched_checkin_enable") {
+      const result = enableRandomCheckins(userId);
+      const generationLine = result.generatedToday > 0
+        ? `Generated ${result.generatedToday} check-ins for ${result.dateKey}.`
+        : `No check-ins generated for ${result.dateKey}${result.skippedReason ? ` (${result.skippedReason})` : "."}`;
+      const view = buildScheduleHomeView(
+        userId,
+        `✅ Random check-ins enabled. ${generationLine}`
+      );
+      await editCallbackMessage(ctx, view.text, view.keyboard);
+      await ctx.answerCallbackQuery("Random check-ins enabled");
+      return;
+    }
+
+    if (data === "sched_checkin_disable") {
+      const result = disableRandomCheckins(userId);
+      const view = buildScheduleHomeView(
+        userId,
+        `🛑 Random check-ins disabled. Cancelled ${result.cancelledMessages} queued check-in(s).`
+      );
+      await editCallbackMessage(ctx, view.text, view.keyboard);
+      await ctx.answerCallbackQuery("Random check-ins disabled");
+      return;
+    }
+
+    if (data === "sched_checkin_regen") {
+      const result = regenerateRandomCheckinsForToday(userId);
+      const notice = result.generated > 0
+        ? `🎲 Regenerated ${result.generated} check-ins for ${result.dateKey}.`
+        : `No check-ins generated for ${result.dateKey}${result.skippedReason ? ` (${result.skippedReason})` : "."}`;
+      const view = buildScheduleHomeView(userId, notice);
+      await editCallbackMessage(ctx, view.text, view.keyboard);
+      await ctx.answerCallbackQuery("Random check-ins regenerated");
+      return;
+    }
+  } catch (err) {
+    error("callbacks", "schedule_callback_failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    callbackMessage = "Schedule action failed";
+  }
+
+  await ctx.answerCallbackQuery(callbackMessage);
 }
 
 export async function handleModelCallback(ctx: CallbackQueryContext<Context>): Promise<void> {

@@ -17,6 +17,8 @@ This project runs as a long-polling daemon on a trusted host machine. It gives y
 - Multiple AI providers with model routing (`claude-cli` and `codex-cli`)
 - Streaming responses via Telegram message edits
 - Voice input (WhisperKit STT) and optional voice output (OpenAI TTS)
+- In-chat schedule manager UI for listing and removing schedules
+- Predefined random daily check-ins preset (`/schedule checkins`)
 - 80+ slash commands for productivity, system ops, and monitoring
 - Allowlist and pairing-code access control
 - Circuit breaker, watchdog, analytics, and automatic recovery paths
@@ -143,7 +145,7 @@ Notable fields:
 The command list is registered in [`src/poller.ts`](./src/poller.ts) via `setMyCommands`.
 
 - Session: `/start`, `/help`, `/clear`, `/stats`, `/model`, `/tts`
-- Productivity: `/todo`, `/note`, `/notes`, `/remind`, `/timer`, `/schedule`, `/schedules`
+- Productivity: `/todo`, `/note`, `/notes`, `/remind`, `/timer`, `/schedule`, `/schedules`, `/schedule checkins`
 - Utilities: `/calc`, `/random`, `/pick`, `/uuid`, `/time`, `/date`
 - AI info: `/weather`, `/define`, `/translate`
 - System info: `/disk`, `/memory`, `/cpu`, `/battery`

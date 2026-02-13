@@ -53,6 +53,9 @@ Dispatch by `jobType`:
 - `prompt`: spawn fresh Claude CLI process, single-turn stream-json exchange.
 - `shell`: run shell command with timeout.
 - `script`: map extension to interpreter, then run as shell task.
+- internal reserved prompt tasks:
+  - `__tg_random_checkin_master__`: daily planner for random check-ins.
+  - `__tg_random_checkin_message__|...`: single check-in delivery task.
 
 Task timeout:
 
@@ -77,6 +80,7 @@ Routing behavior:
 - Start notification is sent for non-silent targets.
 - Completion includes success or failure icon and truncated output.
 - Long output is truncated for Telegram display.
+- Random check-in delivery tasks skip start notifications and send only the generated short message.
 
 ## In-Memory Runtime State
 
@@ -111,8 +115,23 @@ User-facing commands:
 - `/schedules`
 - `/schedule cancel <id>`
 - `/schedule history [id]`
+- `/schedule checkins [status|on|off|regen]`
 
 CLI surface exists for create/list/update/cancel/history via `dist/schedule-cli.js`.
+
+## Random Check-in Preset
+
+The preset is managed via `/schedule checkins` and in-chat schedule UI buttons.
+
+Behavior:
+
+- Enabling creates one daily cron planner (00:05 Berlin).
+- Planner generates one-time check-in schedules for the same day.
+- Times are random and constrained:
+  - maximum 10 messages/day
+  - minimum 60 minutes between messages
+  - never after 23:00 Berlin
+- Generated check-ins are `prompt` jobs with short-message instructions and tool-aware context guidance.
 
 ## Practical Maintenance Notes
 

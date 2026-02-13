@@ -1,5 +1,5 @@
 /**
- * Heartbeat - proactive turn mechanism proactive turn mechanism.
+ * Heartbeat - proactive turn mechanism.
  * Periodically wakes the main Claude session, reads HEARTBEAT.md,
  * and either silently acks or messages the user with findings.
  *
