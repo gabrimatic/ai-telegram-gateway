@@ -528,7 +528,6 @@ export class StreamingResponseHandler {
 
   private markInitialReplySent(): void {
     this.initialReplySent = true;
-    this.stopTypingIndicator();
   }
 
   /** Edit message with MarkdownV2 parse mode, fallback to plain text */

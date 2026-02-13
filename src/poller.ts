@@ -113,6 +113,7 @@ import {
   handleRebootCancelCallback,
   handleAIActionCallback,
   handleScheduleCallback,
+  handleCommandCenterCallback,
 } from "./callbacks";
 
 async function attachActionKeyboard(ctx: Context, messageId: number, token: string): Promise<void> {
@@ -839,50 +840,60 @@ export async function createBot(
   const skipSetMyCommands = options?.skipSetMyCommands ?? false;
 
   // Set command menu (shown when users type '/' in Telegram)
-  // Use scoped command menus so private chats and groups get context-appropriate command lists.
+  // Keep this list in sync with handleCommand (src/commands.ts) plus /pair handled in poller.
   if (!skipSetMyCommands) {
-    const defaultCommands = [
+    const allChatCommands = [
       { command: "start", description: "Open quick actions" },
       { command: "help", description: "Show all commands" },
+      { command: "menu", description: "Open visual command center" },
+      { command: "stats", description: "Gateway runtime stats" },
+      { command: "clear", description: "Fresh session start" },
+      { command: "id", description: "Show your Telegram ID" },
+      { command: "ping", description: "Latency check" },
+      { command: "version", description: "Gateway version info" },
+      { command: "uptime", description: "Gateway uptime" },
       { command: "model", description: "Switch AI model" },
-      { command: "schedule", description: "Open schedule manager" },
-      { command: "schedules", description: "Open schedule manager" },
+      { command: "tts", description: "Toggle voice output" },
+      { command: "todo", description: "Productivity helper" },
+      { command: "remind", description: "Reminder helper" },
       { command: "timer", description: "Quick countdown timer" },
       { command: "weather", description: "Weather info" },
+      { command: "define", description: "Define a word" },
       { command: "translate", description: "Translate text" },
-      { command: "clear", description: "Fresh session start" },
-      { command: "session", description: "Manage AI sessions" },
-    ] as const;
-
-    const privateChatCommands = [
-      ...defaultCommands,
-      { command: "tts", description: "Toggle voice output" },
       { command: "disk", description: "Disk usage" },
       { command: "memory", description: "Memory usage" },
       { command: "cpu", description: "CPU info" },
-      { command: "health", description: "System health" },
-      { command: "sentinel", description: "Proactive monitoring" },
-      { command: "analytics", description: "Usage analytics" },
-      { command: "errors", description: "Recent errors" },
+      { command: "battery", description: "Battery status" },
+      { command: "cd", description: "Change work directory" },
       { command: "ls", description: "List files" },
       { command: "pwd", description: "Show working directory" },
-      { command: "ping", description: "Latency check" },
-      { command: "stats", description: "Gateway runtime stats" },
+      { command: "cat", description: "Show file content" },
+      { command: "find", description: "Find files by name" },
+      { command: "size", description: "Show path size" },
+      { command: "curl", description: "Fetch URL content" },
+      { command: "schedule", description: "Open schedule manager" },
+      { command: "sentinel", description: "Proactive monitoring" },
+      { command: "health", description: "System health" },
+      { command: "analytics", description: "Usage analytics" },
+      { command: "errors", description: "Recent errors" },
+      { command: "ps", description: "List processes" },
+      { command: "kill", description: "Kill process by PID" },
+      { command: "pm2", description: "PM2 process controls" },
+      { command: "git", description: "Git quick commands" },
+      { command: "net", description: "Network diagnostics" },
+      { command: "temp", description: "Temperature info" },
+      { command: "top", description: "Top CPU processes" },
+      { command: "sh", description: "Run shell command" },
+      { command: "session", description: "Manage AI sessions" },
+      { command: "reboot", description: "Reboot host system" },
+      { command: "pair", description: "Pair this Telegram user" },
     ] as const;
 
-    const groupChatCommands = [
-      { command: "help", description: "Show all commands" },
-      { command: "weather", description: "Weather info" },
-      { command: "translate", description: "Translate text" },
-      { command: "model", description: "Switch AI model" },
-      { command: "clear", description: "Fresh session start" },
-    ] as const;
-
-    await bot.api.setMyCommands(defaultCommands);
-    await bot.api.setMyCommands(privateChatCommands, {
+    await bot.api.setMyCommands(allChatCommands);
+    await bot.api.setMyCommands(allChatCommands, {
       scope: { type: "all_private_chats" },
     });
-    await bot.api.setMyCommands(groupChatCommands, {
+    await bot.api.setMyCommands(allChatCommands, {
       scope: { type: "all_group_chats" },
     });
 
@@ -902,6 +913,8 @@ export async function createBot(
   bot.callbackQuery(/^timer_\d+$/, handleTimerCallback);
   bot.callbackQuery("timer_menu", handleTimerMenuCallback);
   bot.callbackQuery("weather_menu", handleWeatherMenuCallback);
+  bot.callbackQuery(/^cnav_.+$/, handleCommandCenterCallback);
+  bot.callbackQuery(/^cmd_.+$/, handleCommandCenterCallback);
   bot.callbackQuery(/^weather_.+$/, handleWeatherCallback);
   bot.callbackQuery(/^translate_.+$/, handleTranslateCallback);
   bot.callbackQuery("help_show", handleHelpCallback);

@@ -23,7 +23,13 @@ import {
 } from "./task-scheduler";
 import { env } from "./env";
 import { loadAllowlist, isAdminUser, isUserAllowed } from "./storage";
-import { buildHelpKeyboard, buildHelpText } from "./commands";
+import {
+  buildHelpKeyboard,
+  buildHelpText,
+  buildCommandCenterView,
+  getCommandCenterSection,
+  handleCommand,
+} from "./commands";
 import { StreamingResponseHandler, sendErrorResponse } from "./response-handler";
 import {
   getActionContext,
@@ -80,6 +86,94 @@ async function editCallbackMessage(
     if (!message.includes("message is not modified")) {
       throw err;
     }
+  }
+}
+
+const CALLBACK_COMMAND_MAP: Record<string, { command: string; args: string }> = {
+  cmd_run_stats: { command: "stats", args: "" },
+  cmd_run_uptime: { command: "uptime", args: "" },
+  cmd_run_version: { command: "version", args: "" },
+  cmd_run_id: { command: "id", args: "" },
+  cmd_run_ping: { command: "ping", args: "" },
+  cmd_run_model: { command: "model", args: "" },
+  cmd_run_tts: { command: "tts", args: "" },
+  cmd_run_clear: { command: "clear", args: "" },
+  cmd_run_session: { command: "session", args: "" },
+  cmd_run_todo: { command: "todo", args: "" },
+  cmd_run_remind: { command: "remind", args: "" },
+  cmd_run_schedule: { command: "schedule", args: "" },
+  cmd_run_schedule_checkins: { command: "schedule", args: "checkins status" },
+  cmd_run_translate: { command: "translate", args: "" },
+  cmd_run_define: { command: "define", args: "" },
+  cmd_run_health: { command: "health", args: "" },
+  cmd_run_errors: { command: "errors", args: "" },
+  cmd_run_errors_patterns: { command: "errors", args: "patterns" },
+  cmd_run_analytics_today: { command: "analytics", args: "today" },
+  cmd_run_analytics_week: { command: "analytics", args: "week" },
+  cmd_run_analytics_month: { command: "analytics", args: "month" },
+  cmd_run_disk: { command: "disk", args: "" },
+  cmd_run_memory: { command: "memory", args: "" },
+  cmd_run_cpu: { command: "cpu", args: "" },
+  cmd_run_battery: { command: "battery", args: "" },
+  cmd_run_temp: { command: "temp", args: "" },
+  cmd_run_top: { command: "top", args: "" },
+  cmd_run_ls: { command: "ls", args: "" },
+  cmd_run_pwd: { command: "pwd", args: "" },
+  cmd_run_cd_home: { command: "cd", args: "~" },
+  cmd_run_cat: { command: "cat", args: "" },
+  cmd_run_find: { command: "find", args: "" },
+  cmd_run_size: { command: "size", args: "" },
+  cmd_run_curl: { command: "curl", args: "" },
+  cmd_run_net_ip: { command: "net", args: "ip" },
+  cmd_run_net_connections: { command: "net", args: "connections" },
+  cmd_run_net_speed: { command: "net", args: "speed" },
+  cmd_run_ps: { command: "ps", args: "" },
+  cmd_run_kill: { command: "kill", args: "" },
+  cmd_run_pm2_ls: { command: "pm2", args: "ls" },
+  cmd_run_pm2_flush: { command: "pm2", args: "flush" },
+  cmd_run_git_status: { command: "git", args: "status" },
+  cmd_run_git_log: { command: "git", args: "log" },
+  cmd_run_git_pull: { command: "git", args: "pull" },
+  cmd_run_sh: { command: "sh", args: "" },
+  cmd_run_reboot: { command: "reboot", args: "" },
+  cmd_run_sentinel: { command: "sentinel", args: "status" },
+  cmd_run_sentinel_on: { command: "sentinel", args: "on" },
+  cmd_run_sentinel_off: { command: "sentinel", args: "off" },
+  cmd_run_sentinel_run: { command: "sentinel", args: "run" },
+  cmd_run_sentinel_create: { command: "sentinel", args: "create" },
+  cmd_run_sentinel_edit: { command: "sentinel", args: "edit" },
+};
+
+export async function handleCommandCenterCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
+  try {
+    if (!(await isAllowedCallbackUser(ctx))) {
+      await ctx.answerCallbackQuery("Not authorized");
+      return;
+    }
+
+    const data = ctx.callbackQuery.data;
+    const section = getCommandCenterSection(data);
+    if (section) {
+      const isAdmin = await isAdminCallbackUser(ctx);
+      const view = buildCommandCenterView(isAdmin, section);
+      await editCallbackMessage(ctx, view.text, view.keyboard);
+      await ctx.answerCallbackQuery("Updated");
+      return;
+    }
+
+    const command = CALLBACK_COMMAND_MAP[data];
+    if (!command) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    await ctx.answerCallbackQuery("Running...");
+    await handleCommand(ctx, command.command, command.args);
+  } catch (err) {
+    error("callbacks", "command_center_callback_failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    await ctx.answerCallbackQuery("Action failed");
   }
 }
 
@@ -516,6 +610,7 @@ export async function handleRebootCancelCallback(ctx: CallbackQueryContext<Conte
 }
 
 export async function handleAIActionCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
+  let streamHandler: StreamingResponseHandler | null = null;
   try {
     if (!(await isAllowedCallbackUser(ctx))) {
       await ctx.answerCallbackQuery("Not authorized");
@@ -550,25 +645,26 @@ export async function handleAIActionCallback(ctx: CallbackQueryContext<Context>)
 
     const prompt = buildActionPrompt(action, actionContext.prompt);
     const finalPrompt = withSystemPrompt(prompt);
-    const streamHandler = new StreamingResponseHandler(ctx);
-    streamHandler.startTypingIndicator();
+    streamHandler = new StreamingResponseHandler(ctx);
+    const activeStreamHandler = streamHandler;
+    activeStreamHandler.startTypingIndicator();
     const onChunk = async (chunk: string): Promise<void> => {
-      await streamHandler.handleChunk(chunk);
+      await activeStreamHandler.handleChunk(chunk);
     };
 
     const result = await runAI(finalPrompt, onChunk);
     incrementMessages();
 
     if (!result.success) {
-      streamHandler.cleanup();
+      activeStreamHandler.cleanup();
       recordFailure("unknown");
       await sendErrorResponse(ctx, result.error || "Couldn't generate a response.", userId);
       return;
     }
 
     recordSuccess();
-    await streamHandler.finalize();
-    const messageId = streamHandler.getCurrentMessageId();
+    await activeStreamHandler.finalize();
+    const messageId = activeStreamHandler.getCurrentMessageId();
     if (messageId && ctx.chat) {
       const nextToken = createActionContext(userId, actionContext.prompt);
       await ctx.api.editMessageReplyMarkup(ctx.chat.id, messageId, {
@@ -576,10 +672,13 @@ export async function handleAIActionCallback(ctx: CallbackQueryContext<Context>)
       });
     }
   } catch (err) {
+    streamHandler?.cleanup();
     incrementErrors();
     error("callbacks", "ai_action_callback_failed", {
       error: err instanceof Error ? err.message : String(err),
     });
     await ctx.answerCallbackQuery("Something went wrong");
+  } finally {
+    streamHandler?.cleanup();
   }
 }

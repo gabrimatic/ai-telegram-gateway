@@ -18,6 +18,7 @@ This project runs as a long-polling daemon on a trusted host machine. It gives y
 - Streaming responses via Telegram message edits
 - Voice input (WhisperKit STT) and optional voice output (OpenAI TTS)
 - In-chat schedule manager UI for listing and removing schedules
+- Visual command center (`/menu`) with inline buttons for command groups
 - Predefined random daily check-ins preset (`/schedule checkins`)
 - 80+ slash commands for productivity, system ops, and monitoring
 - Allowlist and pairing-code access control
@@ -144,19 +145,13 @@ Notable fields:
 
 The command list is registered in [`src/poller.ts`](./src/poller.ts) via `setMyCommands`.
 
-- Session: `/start`, `/help`, `/clear`, `/stats`, `/model`, `/tts`
-- Productivity: `/todo`, `/note`, `/notes`, `/remind`, `/timer`, `/schedule`, `/schedules`, `/schedule checkins`
-- Utilities: `/calc`, `/random`, `/pick`, `/uuid`, `/time`, `/date`
-- AI info: `/weather`, `/define`, `/translate`
-- System info: `/disk`, `/memory`, `/cpu`, `/battery`
-- Files: `/ls`, `/pwd`, `/cat`, `/find`, `/size`, `/upload`, `/tree`
-- Network: `/ping`, `/dns`, `/curl`, `/ports`, `/net`
-- Server management: `/sys`, `/docker`, `/pm2`, `/brew`, `/git`, `/kill`, `/ps`, `/df`, `/top`, `/temp`, `/reboot`, `/sleep`, `/screenshot`, `/deploy`
-- Monitoring: `/health`, `/analytics`, `/errors`
-- Snippets: `/snippet`, `/snippets`
-- Session management: `/session`, `/sessions`, `/context`
-- Notifications: `/quiet`, `/dnd`
-- Meta: `/id`, `/version`, `/uptime`
+The slash suggestion menu includes the full top-level command surface:
+
+- Core/session: `/start`, `/help`, `/menu`, `/stats`, `/clear`, `/id`, `/ping`, `/version`, `/uptime`, `/model`, `/tts`, `/session`
+- Productivity/info: `/todo`, `/remind`, `/timer`, `/schedule`, `/weather`, `/define`, `/translate`
+- Files/network/system: `/cd`, `/ls`, `/pwd`, `/cat`, `/find`, `/size`, `/curl`, `/net`, `/ps`, `/kill`, `/top`, `/temp`, `/disk`, `/memory`, `/cpu`, `/battery`
+- Operations/monitoring: `/pm2`, `/git`, `/sh`, `/reboot`, `/sentinel`, `/health`, `/analytics`, `/errors`
+- Access: `/pair`
 
 ## Data storage
 

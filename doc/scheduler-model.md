@@ -112,7 +112,6 @@ Lifecycle operations:
 User-facing commands:
 
 - `/schedule`
-- `/schedules`
 - `/schedule cancel <id>`
 - `/schedule history [id]`
 - `/schedule checkins [status|on|off|regen]`

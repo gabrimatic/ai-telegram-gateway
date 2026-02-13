@@ -116,8 +116,9 @@ function sanitizeCodeBlock(text: string): string {
 function buildPrivateQuickReplyKeyboard() {
   return {
     keyboard: [
-      [{ text: "/help" }, { text: "/model" }],
-      [{ text: "/schedule" }, { text: "/session" }],
+      [{ text: "/help" }, { text: "/menu" }],
+      [{ text: "/model" }, { text: "/session" }],
+      [{ text: "/schedule" }, { text: "/tts" }],
       [{ text: "/clear" }, { text: "/timer" }],
     ],
     resize_keyboard: true,
@@ -128,6 +129,8 @@ function buildPrivateQuickReplyKeyboard() {
 
 export function buildHelpKeyboard(isAdmin: boolean): InlineKeyboard {
   const keyboard = new InlineKeyboard()
+    .text("\uD83E\uDDF0 Command Center", "cnav_main")
+    .row()
     .text("\u23F1\uFE0F Timer", "timer_menu")
     .text("\uD83C\uDF24\uFE0F Weather", "weather_menu");
 
@@ -138,6 +141,213 @@ export function buildHelpKeyboard(isAdmin: boolean): InlineKeyboard {
   }
 
   return keyboard;
+}
+
+type CommandCenterSection =
+  | "main"
+  | "productivity"
+  | "info"
+  | "session"
+  | "monitoring"
+  | "files"
+  | "network"
+  | "server"
+  | "sentinel";
+
+const COMMAND_CENTER_SECTIONS: Record<string, CommandCenterSection> = {
+  cnav_main: "main",
+  cnav_productivity: "productivity",
+  cnav_info: "info",
+  cnav_session: "session",
+  cnav_monitoring: "monitoring",
+  cnav_files: "files",
+  cnav_network: "network",
+  cnav_server: "server",
+  cnav_sentinel: "sentinel",
+};
+
+export function getCommandCenterSection(callbackData: string): CommandCenterSection | null {
+  return COMMAND_CENTER_SECTIONS[callbackData] ?? null;
+}
+
+export function buildCommandCenterView(
+  isAdmin: boolean,
+  section: CommandCenterSection = "main"
+): { text: string; keyboard: InlineKeyboard } {
+  const adminSections: CommandCenterSection[] = [
+    "monitoring",
+    "files",
+    "network",
+    "server",
+    "sentinel",
+  ];
+  const activeSection = !isAdmin && adminSections.includes(section) ? "main" : section;
+  const keyboard = new InlineKeyboard();
+  const lines: string[] = [];
+
+  switch (activeSection) {
+    case "main":
+      lines.push("\uD83E\uDDF0 Command Center");
+      lines.push("");
+      lines.push("Pick a section. Most actions can run directly from buttons.");
+      keyboard
+        .text("\uD83D\uDCCB Productivity", "cnav_productivity")
+        .text("\uD83C\uDF10 Info", "cnav_info")
+        .row()
+        .text("\uD83D\uDCAC Session", "cnav_session");
+
+      if (isAdmin) {
+        keyboard
+          .text("\uD83D\uDCC8 Monitoring", "cnav_monitoring")
+          .row()
+          .text("\uD83D\uDCC1 Files", "cnav_files")
+          .text("\uD83C\uDF10 Network", "cnav_network")
+          .row()
+          .text("\uD83D\uDDA5 Server", "cnav_server")
+          .text("\uD83D\uDEE1 Sentinel", "cnav_sentinel");
+      } else {
+        lines.push("");
+        lines.push("\u{1F512} Admin-only sections are hidden.");
+      }
+      break;
+
+    case "productivity":
+      lines.push("\uD83D\uDCCB Productivity");
+      lines.push("");
+      lines.push("Open scheduler UI, timer presets, and reminder helpers.");
+      keyboard
+        .text("\uD83D\uDCC5 Schedule Manager", "cmd_run_schedule")
+        .row()
+        .text("\u23F1\uFE0F Timer Presets", "timer_menu")
+        .text("\uD83C\uDFB2 Check-ins", "cmd_run_schedule_checkins")
+        .row()
+        .text("\u2705 Todo Guide", "cmd_run_todo")
+        .text("\u23F0 Remind Guide", "cmd_run_remind");
+      break;
+
+    case "info":
+      lines.push("\uD83C\uDF10 AI Info");
+      lines.push("");
+      lines.push("Weather, translation, definitions, and runtime info.");
+      keyboard
+        .text("\uD83C\uDF24\uFE0F Weather", "weather_menu")
+        .text("\uD83D\uDD20 Translate", "cmd_run_translate")
+        .row()
+        .text("\uD83D\uDCD6 Define", "cmd_run_define")
+        .text("\uD83D\uDCCA Stats", "cmd_run_stats")
+        .row()
+        .text("\u23F1\uFE0F Uptime", "cmd_run_uptime")
+        .text("\u{1F680} Version", "cmd_run_version")
+        .row()
+        .text("\u{1F194} My ID", "cmd_run_id")
+        .text("\uD83C\uDFD3 Ping", "cmd_run_ping");
+      break;
+
+    case "session":
+      lines.push("\uD83D\uDCAC Session");
+      lines.push("");
+      lines.push("Control model/session lifecycle and voice output.");
+      keyboard
+        .text("\u{1F916} Model", "cmd_run_model")
+        .text("\u{1F50A} TTS", "cmd_run_tts")
+        .row()
+        .text("\u{1F5A5}\uFE0F Session", "cmd_run_session")
+        .text("\uD83E\uDDF9 Clear", "cmd_run_clear")
+        .row()
+        .text("\u2753 Help", "help_show");
+      break;
+
+    case "monitoring":
+      lines.push("\uD83D\uDCC8 Monitoring");
+      lines.push("");
+      lines.push("Health dashboard, analytics windows, host vitals, and errors.");
+      keyboard
+        .text("\uD83E\uDE7A Health", "cmd_run_health")
+        .text("\u{26A0}\uFE0F Errors", "cmd_run_errors")
+        .row()
+        .text("\uD83D\uDCCA Today", "cmd_run_analytics_today")
+        .text("\uD83D\uDCC5 Week", "cmd_run_analytics_week")
+        .row()
+        .text("\uD83D\uDCC6 Month", "cmd_run_analytics_month")
+        .text("\uD83D\uDD0E Patterns", "cmd_run_errors_patterns")
+        .row()
+        .text("\uD83D\uDCBE Disk", "cmd_run_disk")
+        .text("\uD83E\uDDE0 Memory", "cmd_run_memory")
+        .row()
+        .text("\u26A1 CPU", "cmd_run_cpu")
+        .text("\uD83D\uDD0B Battery", "cmd_run_battery")
+        .row()
+        .text("\uD83C\uDF21 Temp", "cmd_run_temp")
+        .text("\uD83D\uDD1D Top", "cmd_run_top");
+      break;
+
+    case "files":
+      lines.push("\uD83D\uDCC1 Files");
+      lines.push("");
+      lines.push("Local navigation and file tools.");
+      keyboard
+        .text("\uD83D\uDCC2 List Home", "cmd_run_ls")
+        .text("\uD83D\uDCCD PWD", "cmd_run_pwd")
+        .row()
+        .text("\u{1F3E0} CD Home", "cmd_run_cd_home")
+        .text("\uD83D\uDCC4 Cat Help", "cmd_run_cat")
+        .row()
+        .text("\uD83D\uDD0D Find Help", "cmd_run_find")
+        .text("\uD83D\uDCCA Size Help", "cmd_run_size");
+      break;
+
+    case "network":
+      lines.push("\uD83C\uDF10 Network");
+      lines.push("");
+      lines.push("Connection checks and diagnostics.");
+      keyboard
+        .text("\uD83C\uDF10 External IP", "cmd_run_net_ip")
+        .text("\uD83D\uDD17 Connections", "cmd_run_net_connections")
+        .row()
+        .text("\uD83D\uDE80 Speed Test", "cmd_run_net_speed")
+        .text("\uD83C\uDFD3 Ping", "cmd_run_ping")
+        .row()
+        .text("\uD83D\uDD0C Curl Help", "cmd_run_curl");
+      break;
+
+    case "server":
+      lines.push("\uD83D\uDDA5 Server");
+      lines.push("");
+      lines.push("Process, PM2, git, shell, and reboot controls.");
+      keyboard
+        .text("\uD83D\uDD0D Processes", "cmd_run_ps")
+        .text("\uD83D\uDD2A Kill Help", "cmd_run_kill")
+        .row()
+        .text("\u2699\uFE0F PM2 List", "cmd_run_pm2_ls")
+        .text("\uD83E\uDDF9 PM2 Flush", "cmd_run_pm2_flush")
+        .row()
+        .text("\uD83D\uDCE6 Git Status", "cmd_run_git_status")
+        .text("\uD83D\uDCDC Git Log", "cmd_run_git_log")
+        .row()
+        .text("\u2B07\uFE0F Git Pull", "cmd_run_git_pull")
+        .text("\uD83D\uDCBB Shell Help", "cmd_run_sh")
+        .row()
+        .text("\u26A0\uFE0F Reboot", "cmd_run_reboot");
+      break;
+
+    case "sentinel":
+      lines.push("\uD83D\uDEE1 Sentinel");
+      lines.push("");
+      lines.push("Sentinel controls and status shortcuts.");
+      keyboard
+        .text("\uD83D\uDCCA Status", "cmd_run_sentinel")
+        .text("\u2705 Start", "cmd_run_sentinel_on")
+        .row()
+        .text("\u23F9\uFE0F Stop", "cmd_run_sentinel_off")
+        .text("\uD83D\uDC93 Run now", "cmd_run_sentinel_run")
+        .row()
+        .text("\uD83C\uDD95 Create checklist", "cmd_run_sentinel_create")
+        .text("\u270F\uFE0F View/Edit", "cmd_run_sentinel_edit");
+      break;
+  }
+
+  keyboard.row().text("\u2B05\uFE0F Back", activeSection === "main" ? "help_show" : "cnav_main");
+  return { text: lines.join("\n"), keyboard };
 }
 
 export function buildHelpText(options: {
@@ -159,7 +369,8 @@ export function buildHelpText(options: {
   }
 
   lines.push("\uD83D\uDCCB *PRODUCTIVITY*");
-  lines.push("/schedule /schedules - Manage schedules in chat (list/remove)");
+  lines.push("/schedule - Manage schedules in chat (list/remove)");
+  lines.push("/menu - Visual command center with buttons");
   lines.push("/timer - Quick countdown timer");
   lines.push("/schedule checkins - Random daily check-ins preset");
   lines.push("/todo /remind - Scheduler-backed productivity helpers");
@@ -228,6 +439,7 @@ export async function handleCommand(
       const startAction = args.trim().toLowerCase();
       const deepLinkRoute: Record<string, string> = {
         help: "help",
+        menu: "menu",
         model: "model",
         session: "session",
         timer: "timer",
@@ -240,6 +452,8 @@ export async function handleCommand(
 
       const safeProviderName = escapeMarkdown(providerName);
       const keyboard = buildHelpKeyboard(isAdmin)
+        .row()
+        .text("\uD83E\uDDF0 Menu", "cnav_main")
         .row()
         .text("\u2753 Help", "help_show");
 
@@ -265,6 +479,12 @@ export async function handleCommand(
         parse_mode: "Markdown",
         reply_markup: buildHelpKeyboard(isAdmin),
       });
+      return true;
+    }
+
+    case "menu": {
+      const view = buildCommandCenterView(isAdmin, "main");
+      await ctx.reply(view.text, { reply_markup: view.keyboard });
       return true;
     }
 
@@ -850,12 +1070,6 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
         return true;
       }
 
-      const view = buildScheduleHomeView(userId!);
-      await ctx.reply(view.text, { reply_markup: view.keyboard });
-      return true;
-    }
-
-    case "schedules": {
       const view = buildScheduleHomeView(userId!);
       await ctx.reply(view.text, { reply_markup: view.keyboard });
       return true;

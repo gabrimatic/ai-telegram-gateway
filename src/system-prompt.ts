@@ -66,7 +66,7 @@ export function buildSystemPrompt(
     "",
     "KEY COMMANDS:",
     "- /help - list commands, /model - switch haiku/opus, /tts - toggle voice",
-    "- /schedules - productivity",
+    "- /schedule - productivity",
     "- /sh /ls /cat /find - shell access",
     "- /sys /docker /pm2 /health /analytics - system monitoring",
     "- /weather /define /translate - info lookups",

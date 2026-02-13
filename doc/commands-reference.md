@@ -16,9 +16,15 @@ Menu source:
 
 - Some commands are admin-only.
 - Some commands are disabled when `TG_ENABLE_DANGEROUS_COMMANDS=false`.
-- Unknown commands fall back to normal AI chat handling.
+- Unknown slash commands return an explicit "not recognized" response.
 
 ## Core and Session
+
+### `/pair <code>`
+
+- Used by unauthorized users when pairing mode is enabled.
+- Successful pairing adds the user to allowlist and rotates the pairing code.
+- Authorized users get an "already paired" response.
 
 ### `/start`
 
@@ -27,6 +33,12 @@ Shows welcome text and quick-action buttons.
 ### `/help`
 
 Shows grouped command summary.
+
+### `/menu`
+
+Opens the visual command center with inline keyboards for all command groups.
+Most commands can be triggered directly from buttons, and parameterized commands
+show guided usage prompts.
 
 ### `/stats`
 
@@ -188,10 +200,6 @@ Opens in-chat schedule manager UI with buttons for:
 - removing active schedules
 - random check-in preset controls
 
-### `/schedules`
-
-Alias for `/schedule` (same in-chat manager UI).
-
 ### `/schedule cancel <id>`
 
 Cancels active schedule by ID.
@@ -295,6 +303,8 @@ This command is dangerous and can be globally disabled with `TG_ENABLE_DANGEROUS
 
 The bot also handles inline button callback actions:
 
+- command center section navigation (`cnav_*`)
+- command execution shortcuts (`cmd_run_*`)
 - timer menu and preset timers
 - weather menu and city shortcuts
 - translate language shortcuts
