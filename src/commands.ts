@@ -976,10 +976,16 @@ export async function handleCommand(
         return true;
       }
 
-      const resolveThreadId = (argIndex: number): number | null => {
-        const explicit = parseThreadId(parts[argIndex]);
-        if (explicit) return explicit;
-        return currentThreadId;
+      const resolveThreadId = (argIndex: number): { id: number | null; invalidExplicit: boolean } => {
+        const token = parts[argIndex];
+        if (!token) {
+          return { id: currentThreadId, invalidExplicit: false };
+        }
+        const explicit = parseThreadId(token);
+        if (explicit) {
+          return { id: explicit, invalidExplicit: false };
+        }
+        return { id: null, invalidExplicit: true };
       };
 
       if (sub === "edit") {
@@ -1010,7 +1016,12 @@ export async function handleCommand(
         return true;
       }
 
-      const threadId = resolveThreadId(1);
+      const resolved = resolveThreadId(1);
+      if (resolved.invalidExplicit) {
+        await ctx.reply(`Invalid thread ID: \`${parts[1]}\`. Must be a positive integer.`, { parse_mode: "Markdown" });
+        return true;
+      }
+      const threadId = resolved.id;
       if (!threadId) {
         await ctx.reply("Missing thread id. Provide `<thread_id>` or run this inside a topic.", { parse_mode: "Markdown" });
         return true;

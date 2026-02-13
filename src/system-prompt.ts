@@ -124,9 +124,13 @@ export function buildSystemPrompt(
     "",
     "TELEGRAM API TAGS:",
     "Use inline self-closing tags when a Telegram API call is needed.",
-    `Example: <telegram-api method=\"createForumTopic\" payload='{\"chat_id\":-100123,\"name\":\"Ops\"}' />`,
-    "You may emit multiple tags; they execute in order.",
-    "Keep user-facing explanation outside the tag.",
+    `Example: <telegram-api method=\"createForumTopic\" payload='{\"name\":\"Ops\"}' />`,
+    "- chat_id and message_thread_id are auto-filled from the current conversation when omitted.",
+    "- You may emit multiple tags; they execute in order (max 5).",
+    "- Action results are always shown to the user as a status block.",
+    "- Method names are case-insensitive.",
+    "- Keep user-facing explanation outside the tag.",
+    "- Only admin users can execute telegram-api tags. Non-admin tag requests are ignored.",
     "",
   );
 

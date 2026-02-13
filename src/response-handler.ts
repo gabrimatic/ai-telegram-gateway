@@ -390,56 +390,63 @@ export class StreamingResponseHandler {
     const userId = this.ctx.from?.id?.toString();
     const allowlist = await loadAllowlist();
     const isAdmin = userId ? isAdminUser(userId, allowlist) : false;
+    const msg = this.ctx.msg as { message_thread_id?: number } | undefined;
     const execution = await executeTelegramApiTags(this.ctx.api, this.accumulatedText, {
       callerType: "model_tag",
       userId,
       isAdmin,
       chatId: this.ctx.chat?.id,
+      messageThreadId: typeof msg?.message_thread_id === "number" ? msg.message_thread_id : undefined,
     });
 
     if (!execution.hadTags) {
       return;
     }
 
-    this.accumulatedText = execution.cleanedText;
+    const cleanedText = execution.cleanedText;
     const summaryText = execution.summaryLines.length > 0
       ? `Telegram API actions:\n${execution.summaryLines.join("\n")}`
       : "";
-    const visibleText = removeFileTags(this.accumulatedText).trim();
+    const visibleText = removeFileTags(cleanedText).trim();
 
-    if (visibleText) {
+    // Build display text: always include action status when tags exist
+    let displayText: string;
+    if (visibleText && summaryText) {
+      displayText = `${visibleText}\n\n${summaryText}`;
+    } else if (summaryText) {
+      displayText = summaryText;
+    } else if (visibleText) {
+      displayText = visibleText;
+    } else {
+      // No visible text and no summary - delete the placeholder message
       if (this.currentMessageId !== null && this.ctx.chat) {
-        await this.editWithMarkdown(this.ctx.chat.id, this.currentMessageId, visibleText);
-      } else {
-        const msg = await this.sendWithMarkdown(visibleText);
-        this.currentMessageId = msg.message_id;
+        try {
+          await this.ctx.api.deleteMessage(this.ctx.chat.id, this.currentMessageId);
+        } catch {
+          // Ignore cleanup failure.
+        }
       }
-      this.lastSentText = visibleText;
+      this.accumulatedText = "";
       return;
     }
 
+    // Persist summary into accumulatedText so processFileTags() preserves it.
+    // accumulatedText keeps file tags for dispatch, plus summary block at the end.
     if (summaryText) {
-      // Preserve file tags in accumulated text so processFileTags() still dispatches uploads.
-      this.accumulatedText = this.accumulatedText.trim()
-        ? `${summaryText}\n${this.accumulatedText}`
+      this.accumulatedText = cleanedText.trim()
+        ? `${cleanedText}\n\n${summaryText}`
         : summaryText;
-      if (this.currentMessageId !== null && this.ctx.chat) {
-        await this.editWithMarkdown(this.ctx.chat.id, this.currentMessageId, summaryText);
-      } else {
-        const msg = await this.sendWithMarkdown(summaryText);
-        this.currentMessageId = msg.message_id;
-      }
-      this.lastSentText = summaryText;
-      return;
+    } else {
+      this.accumulatedText = cleanedText;
     }
 
     if (this.currentMessageId !== null && this.ctx.chat) {
-      try {
-        await this.ctx.api.deleteMessage(this.ctx.chat.id, this.currentMessageId);
-      } catch {
-        // Ignore cleanup failure.
-      }
+      await this.editWithMarkdown(this.ctx.chat.id, this.currentMessageId, displayText);
+    } else {
+      const sent = await this.sendWithMarkdown(displayText);
+      this.currentMessageId = sent.message_id;
     }
+    this.lastSentText = displayText;
   }
 
   private async performDraft(force: boolean = false): Promise<void> {
@@ -746,20 +753,22 @@ export async function sendResponse(
   const { text, includeAudio = false, userId } = options;
   const allowlist = await loadAllowlist();
   const isAdmin = userId ? isAdminUser(userId, allowlist) : false;
+  const msg = ctx.msg as { message_thread_id?: number } | undefined;
   const apiTagExecution = await executeTelegramApiTags(ctx.api, text, {
     callerType: "model_tag",
     userId,
     isAdmin,
     chatId: ctx.chat?.id,
+    messageThreadId: typeof msg?.message_thread_id === "number" ? msg.message_thread_id : undefined,
   });
   const cleanedText = removeTelegramApiTags(apiTagExecution.cleanedText);
   const summaryText = apiTagExecution.summaryLines.length > 0
     ? `Telegram API actions:\n${apiTagExecution.summaryLines.join("\n")}`
     : "";
   const visibleTextAfterFileTags = removeFileTags(cleanedText).trim();
-  const finalText = visibleTextAfterFileTags
-    ? cleanedText
-    : summaryText
+  const finalText = visibleTextAfterFileTags && summaryText
+    ? `${cleanedText}\n\n${summaryText}`.trim()
+    : summaryText && !visibleTextAfterFileTags
       ? `${summaryText}\n${cleanedText}`.trim()
       : cleanedText;
 

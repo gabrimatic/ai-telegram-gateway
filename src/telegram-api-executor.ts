@@ -20,6 +20,7 @@ export interface TelegramApiExecutionMeta {
   callerType: TelegramApiCallerType;
   userId?: string;
   chatId?: string | number;
+  messageThreadId?: number;
   isAdmin?: boolean;
   botId?: number;
 }
@@ -53,8 +54,69 @@ export interface TelegramApiContextLike {
   getChatMember?: (chatId: number | string, userId: number) => Promise<unknown>;
 }
 
-const TELEGRAM_API_TAG_RE = /<telegram-api\b[^>]*\/>/gi;
 const TAG_LIMIT_PER_RESPONSE = 5;
+
+/**
+ * Quote-aware scanner that finds `<telegram-api ... />` tags even when
+ * attribute values contain `>` (e.g. payload='{"name":"A > B"}').
+ * Returns array of { raw, index } for each tag found.
+ */
+function scanTelegramApiTags(text: string): { raw: string; index: number }[] {
+  const results: { raw: string; index: number }[] = [];
+  const opener = "<telegram-api";
+  let searchFrom = 0;
+
+  while (searchFrom < text.length) {
+    const tagStart = text.toLowerCase().indexOf(opener, searchFrom);
+    if (tagStart === -1) break;
+
+    // Walk forward from after "<telegram-api", skipping quoted regions
+    let i = tagStart + opener.length;
+    let found = false;
+
+    while (i < text.length) {
+      const ch = text[i];
+
+      // Enter quoted attribute value - skip to matching close quote
+      if (ch === "'" || ch === '"') {
+        const q = ch;
+        i++;
+        while (i < text.length && text[i] !== q) {
+          // Only skip backslash+quote (the delimiter escape we support)
+          if (text[i] === "\\" && i + 1 < text.length && text[i + 1] === q) {
+            i += 2;
+            continue;
+          }
+          i++;
+        }
+        if (i < text.length) i++; // skip closing quote
+        continue;
+      }
+
+      // Self-closing end: />
+      if (ch === "/" && i + 1 < text.length && text[i + 1] === ">") {
+        const raw = text.slice(tagStart, i + 2);
+        results.push({ raw, index: tagStart });
+        searchFrom = i + 2;
+        found = true;
+        break;
+      }
+
+      // Bare > without preceding / means malformed tag - stop scanning this match
+      if (ch === ">") {
+        break;
+      }
+
+      i++;
+    }
+
+    if (!found) {
+      searchFrom = tagStart + opener.length;
+    }
+  }
+
+  return results;
+}
 
 const METHOD_RIGHTS: Record<string, string> = {
   createForumTopic: "can_manage_topics",
@@ -73,6 +135,20 @@ const METHOD_RIGHTS: Record<string, string> = {
   setChatPermissions: "can_restrict_members",
 };
 
+const CREATOR_EXCEPTION_METHODS = new Set([
+  "editForumTopic",
+  "closeForumTopic",
+  "reopenForumTopic",
+]);
+
+const THREAD_CONTEXT_METHODS = new Set([
+  "editForumTopic",
+  "closeForumTopic",
+  "reopenForumTopic",
+  "deleteForumTopic",
+  "unpinAllForumTopicMessages",
+]);
+
 function getApiClient(ctxOrBotApi: TelegramApiContextLike): Required<TelegramApiContextLike> {
   const api = ctxOrBotApi.api ?? ctxOrBotApi;
   if (!api.raw || typeof api.raw !== "object") {
@@ -86,6 +162,20 @@ function toRecord(value: unknown): Record<string, unknown> {
     return {};
   }
   return value as Record<string, unknown>;
+}
+
+function resolveMethodName(method: string, ctxOrBotApi: TelegramApiContextLike): string {
+  try {
+    const api = ctxOrBotApi.api ?? ctxOrBotApi;
+    const raw = api.raw as Record<string, unknown> | undefined;
+    if (!raw || typeof raw !== "object") return method;
+    if (method in raw) return method;
+    const lower = method.toLowerCase();
+    const found = Object.keys(raw).find(k => k.toLowerCase() === lower);
+    return found ?? method;
+  } catch {
+    return method;
+  }
 }
 
 function getChatIdFromPayload(payload: Record<string, unknown>, fallback?: string | number): string | number | undefined {
@@ -200,6 +290,11 @@ async function assertBotRightsForMethod(
 
   const hasRight = member[requiredRight] === true;
   if (!hasRight) {
+    // Telegram allows topic creators to manage their own topics
+    // even without can_manage_topics - let API be source of truth
+    if (CREATOR_EXCEPTION_METHODS.has(method)) {
+      return;
+    }
     throw new Error(`Missing bot admin right '${requiredRight}' for ${method}`);
   }
 }
@@ -226,26 +321,49 @@ export function parseTelegramApiPayload(payloadText: string): ParsedJsonPayload 
   }
 }
 
+function extractPayloadAttribute(raw: string): string | null {
+  const payloadIdx = raw.search(/payload\s*=\s*['"]/i);
+  if (payloadIdx === -1) return null;
+  const eqIdx = raw.indexOf("=", payloadIdx);
+  if (eqIdx === -1) return null;
+  let start = eqIdx + 1;
+  while (start < raw.length && raw[start] === " ") start++;
+  const quote = raw[start];
+  if (quote !== "'" && quote !== '"') return null;
+  start++;
+  let result = "";
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    // Only treat backslash as escape for the delimiter quote itself
+    if (ch === "\\" && i + 1 < raw.length && raw[i + 1] === quote) {
+      result += quote;
+      i++;
+      continue;
+    }
+    if (ch === quote) return result;
+    result += ch;
+  }
+  return null; // unterminated
+}
+
 export function parseTelegramApiTags(text: string): TelegramApiTag[] {
   const tags: TelegramApiTag[] = [];
   if (!text) return tags;
 
-  let match: RegExpExecArray | null;
-  while ((match = TELEGRAM_API_TAG_RE.exec(text)) !== null) {
-    const raw = match[0];
-    const methodMatch = raw.match(/method\s*=\s*"([^"]+)"/i);
-    const payloadMatch = raw.match(/payload\s*=\s*'([^']*)'/i)
-      || raw.match(/payload\s*=\s*"([^"]*)"/i);
+  const scanned = scanTelegramApiTags(text);
+  for (const { raw, index } of scanned) {
+    const methodMatch = raw.match(/method\s*=\s*["']([^"']+)["']/i);
+    const payloadValue = extractPayloadAttribute(raw);
 
-    if (!methodMatch || !payloadMatch) {
+    if (!methodMatch || payloadValue === null) {
       continue;
     }
 
     tags.push({
       raw,
       method: methodMatch[1].trim(),
-      payload: payloadMatch[1],
-      index: match.index,
+      payload: payloadValue,
+      index,
     });
   }
 
@@ -254,7 +372,16 @@ export function parseTelegramApiTags(text: string): TelegramApiTag[] {
 
 export function removeTelegramApiTags(text: string): string {
   if (!text) return text;
-  return text.replace(TELEGRAM_API_TAG_RE, "").trim();
+  const scanned = scanTelegramApiTags(text);
+  if (scanned.length === 0) return text;
+
+  // Remove tags in reverse order to preserve indices
+  let result = text;
+  for (let i = scanned.length - 1; i >= 0; i--) {
+    const { raw, index } = scanned[i];
+    result = result.slice(0, index) + result.slice(index + raw.length);
+  }
+  return result.trim();
 }
 
 export async function isAdminActor(userId?: string, provided?: boolean): Promise<boolean> {
@@ -274,20 +401,31 @@ export async function executeTelegramApiCall(
   const api = getApiClient(ctxOrBotApi);
   const method = request.method.trim();
   const payload = request.payload || {};
+
+  // Resolve case-insensitive method name early so rights checks and
+  // downstream logic all use the canonical Telegram method key.
+  const rawKeys = Object.keys(api.raw as Record<string, unknown>);
+  let resolvedMethodKey = method;
+  if (!(method in (api.raw as Record<string, unknown>))) {
+    const lowerMethod = method.toLowerCase();
+    const found = rawKeys.find(k => k.toLowerCase() === lowerMethod);
+    if (found) resolvedMethodKey = found;
+  }
+
   const chatId = getChatIdFromPayload(payload, meta.chatId);
 
   const admin = await isAdminActor(meta.userId, meta.isAdmin);
   if (!admin) {
     const result: TelegramApiExecutionResult = {
       success: false,
-      method,
+      method: resolvedMethodKey,
       payload,
-      summary: `Blocked ${method}: admin only`,
+      summary: `Blocked ${resolvedMethodKey}: admin only`,
       description: "admin only",
     };
     warn("telegram-api", "telegram_api_call_failed", {
       callerType: meta.callerType,
-      method,
+      method: resolvedMethodKey,
       chatId,
       userId: meta.userId,
       success: false,
@@ -296,7 +434,7 @@ export async function executeTelegramApiCall(
     return result;
   }
 
-  const rawMethod = (api.raw as Record<string, unknown>)[method];
+  const rawMethod = (api.raw as Record<string, unknown>)[resolvedMethodKey];
   if (typeof rawMethod !== "function") {
     const unknownResult: TelegramApiExecutionResult = {
       success: false,
@@ -317,16 +455,16 @@ export async function executeTelegramApiCall(
   }
 
   try {
-    await assertBotRightsForMethod(api, method, payload, meta);
+    await assertBotRightsForMethod(api, resolvedMethodKey, payload, meta);
     const payloadKeys = Object.keys(payload);
     const result = payloadKeys.length > 0
       ? await (rawMethod as (data: Record<string, unknown>) => Promise<unknown>)(payload)
       : await (rawMethod as () => Promise<unknown>)();
-    const summary = summarizeResult(method, result);
+    const summary = summarizeResult(resolvedMethodKey, result);
 
     info("telegram-api", "telegram_api_call", {
       callerType: meta.callerType,
-      method,
+      method: resolvedMethodKey,
       chatId,
       userId: meta.userId,
       success: true,
@@ -334,7 +472,7 @@ export async function executeTelegramApiCall(
 
     return {
       success: true,
-      method,
+      method: resolvedMethodKey,
       payload,
       result,
       summary,
@@ -343,16 +481,16 @@ export async function executeTelegramApiCall(
     const parsed = parseTelegramError(err);
     const failure: TelegramApiExecutionResult = {
       success: false,
-      method,
+      method: resolvedMethodKey,
       payload,
-      summary: `${method} failed: ${parsed.description}`,
+      summary: `${resolvedMethodKey} failed: ${parsed.description}`,
       errorCode: parsed.code,
       description: parsed.description,
     };
 
     logError("telegram-api", "telegram_api_call_failed", {
       callerType: meta.callerType,
-      method,
+      method: resolvedMethodKey,
       chatId,
       userId: meta.userId,
       success: false,
@@ -399,8 +537,21 @@ export async function executeTelegramApiTags(
       continue;
     }
 
+    // Resolve case-insensitive method name for context auto-fill checks
+    const resolvedMethod = resolveMethodName(tag.method, ctxOrBotApi);
+
+    // Auto-fill context from meta when model omits it
+    if (!parsed.payload.chat_id && meta.chatId !== undefined) {
+      parsed.payload.chat_id = meta.chatId;
+    }
+    if (THREAD_CONTEXT_METHODS.has(resolvedMethod)
+      && !parsed.payload.message_thread_id
+      && meta.messageThreadId !== undefined) {
+      parsed.payload.message_thread_id = meta.messageThreadId;
+    }
+
     const result = await executeTelegramApiCall(ctxOrBotApi, {
-      method: tag.method,
+      method: resolvedMethod,
       payload: parsed.payload,
     }, meta);
 

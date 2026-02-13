@@ -126,7 +126,7 @@ All commands in this section are admin-only.
 
 ### `/topic`
 
-Forum topic helpers for group/supergroup chats:
+Forum topic helpers for topic-enabled chats (groups, supergroups, and private chats with topics enabled):
 
 - `/topic create <name>`
 - `/topic edit <thread_id> <new_name>`
@@ -143,6 +143,7 @@ Forum topic helpers for group/supergroup chats:
 
 If `thread_id` is omitted for close/reopen/delete/unpinall, the bot uses the current `message_thread_id`.
 If no current thread exists and no explicit ID is provided, command returns a usage error.
+If an explicit thread ID is provided but is not a valid positive integer, the command returns a validation error instead of falling back to the current thread.
 
 ### `/group`
 
@@ -167,6 +168,9 @@ Behavior:
 
 - Parses payload as strict JSON object.
 - Dispatches to dynamic `ctx.api.raw[method](payload)`.
+- Method names are case-insensitive (e.g., `createforumtopic` resolves to `createForumTopic`).
+- When called via model `<telegram-api>` tags, `chat_id` and `message_thread_id` are auto-filled from the current conversation context if omitted.
+- Action results are always shown to the user as a compact status block, even when the model includes other text.
 - Returns clear parse errors, unknown-method errors, and Telegram API errors.
 - Admin-only; no per-method allowlist for admin users.
 
