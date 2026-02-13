@@ -267,21 +267,14 @@ async function resolveTopicIconEmoji(
   const stickers = stickersRaw as Array<Record<string, unknown>>;
   const match = stickers.find((sticker) => sticker?.emoji === iconEmoji);
   if (!match || typeof match.custom_emoji_id !== "string" || !match.custom_emoji_id.trim()) {
-    const topicName = typeof payload.name === "string" ? payload.name.trim() : "";
-    if (topicName) {
-      // Fallback: keep mutation successful by embedding the emoji in the topic title
-      // when Telegram has no matching custom topic icon for it.
-      if (!topicName.startsWith(iconEmoji)) {
-        payload.name = `${iconEmoji} ${topicName}`.trim();
-      }
-      delete payload.icon_emoji;
-      warn("telegram-api", "topic_icon_emoji_not_available_fallback_to_title", {
-        method,
-        requestedEmoji: iconEmoji,
-      });
-      return;
-    }
-    throw new Error(`No custom icon found for emoji '${iconEmoji}'. Use /topic icons to list available topic emojis.`);
+    const available = stickers
+      .map((sticker) => typeof sticker?.emoji === "string" ? sticker.emoji : "")
+      .filter(Boolean)
+      .slice(0, 12);
+    const hint = available.length > 0
+      ? ` Available topic emojis: ${available.join(" ")}`
+      : "";
+    throw new Error(`No custom icon found for emoji '${iconEmoji}'.${hint} Use /topic icons to list all available topic emojis.`);
   }
 
   payload.icon_custom_emoji_id = match.custom_emoji_id;

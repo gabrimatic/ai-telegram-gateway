@@ -74,7 +74,7 @@ function hasTelegramApiErrors(summaryLines: string[]): boolean {
 }
 
 function appendTelegramApiFailureNote(text: string): string {
-  const note = "I couldn't apply one or more Telegram changes. I can retry with a safer fallback.";
+  const note = "I couldn't complete one or more requested Telegram actions.";
   const base = text.trim();
   if (!base) return note;
   if (base.includes(note)) return base;
