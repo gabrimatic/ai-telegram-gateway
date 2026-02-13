@@ -69,6 +69,18 @@ function toTelegramMarkdown(text: string): string {
   }
 }
 
+function hasTelegramApiErrors(summaryLines: string[]): boolean {
+  return summaryLines.some((line) => line.includes(": ERROR"));
+}
+
+function appendTelegramApiFailureNote(text: string): string {
+  const note = "I couldn't apply one or more Telegram changes. I can retry with a safer fallback.";
+  const base = text.trim();
+  if (!base) return note;
+  if (base.includes(note)) return base;
+  return `${base}\n\n${note}`;
+}
+
 function buildReplyOptions(
   ctx: Context,
   options?: { quote?: boolean; disableLinkPreview?: boolean }
@@ -434,7 +446,11 @@ export class StreamingResponseHandler {
         summary: execution.summaryLines.join(" | "),
       });
     }
-    const visibleText = removeFileTags(cleanedText).trim();
+    const hadApiErrors = hasTelegramApiErrors(execution.summaryLines);
+    let visibleText = removeFileTags(cleanedText).trim();
+    if (hadApiErrors) {
+      visibleText = appendTelegramApiFailureNote(visibleText);
+    }
 
     if (!visibleText) {
       // No visible model text after tag cleanup - delete placeholder message.
@@ -779,7 +795,10 @@ export async function sendResponse(
       summary: apiTagExecution.summaryLines.join(" | "),
     });
   }
-  const finalText = cleanedText;
+  const hadApiErrors = hasTelegramApiErrors(apiTagExecution.summaryLines);
+  const finalText = hadApiErrors
+    ? appendTelegramApiFailureNote(cleanedText)
+    : cleanedText;
 
   if (!finalText || finalText.trim().length === 0) {
     await ctx.reply("(empty response)", buildReplyOptions(ctx) as any);
