@@ -46,7 +46,7 @@
     "argValidationMode": "moderate"
   },
   "heartbeat": {
-    "enabled": false,
+    "enabled": true,
     "intervalMinutes": 30,
     "ackMaxChars": 300,
     "activeHoursStart": 8,

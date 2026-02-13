@@ -368,7 +368,8 @@ async function handleMessage(ctx: Context): Promise<void> {
   // Check for commands
   if (messageText.startsWith("/")) {
     const parts = messageText.slice(1).split(" ");
-    const command = parts[0];
+    const commandToken = parts[0] || "";
+    const command = commandToken.split("@")[0].toLowerCase();
     const args = parts.slice(1).join(" ");
 
     // Track command usage
@@ -397,8 +398,19 @@ async function handleMessage(ctx: Context): Promise<void> {
       return;
     }
 
+    if (command === "pair" && isUserAllowed(userId, allowlist)) {
+      await ctx.reply("You're already paired and authorized \u{2705} Use /help to see available commands.");
+      return;
+    }
+
     // Handle other commands
     if (await handleCommand(ctx, command, args)) {
+      return;
+    }
+
+    // For authorized users, unknown slash commands should not be sent to AI.
+    if (isUserAllowed(userId, allowlist)) {
+      await ctx.reply(`I don't recognize /${command}. Use /help for the command list.`);
       return;
     }
   }
@@ -758,26 +770,63 @@ export async function createBot(
   const skipSetMyCommands = options?.skipSetMyCommands ?? false;
 
   // Set command menu (shown when users type '/' in Telegram)
-  // Grouped logically: session, productivity, utilities, info, system, files, network
+  // Use scoped command menus so private chats and groups get context-appropriate command lists.
   if (!skipSetMyCommands) {
-    await bot.api.setMyCommands([
-    { command: "help", description: "Show all commands" },
-    { command: "schedule", description: "View scheduled tasks" },
-    { command: "timer", description: "Quick countdown timer" },
-    { command: "weather", description: "Weather info" },
-    { command: "model", description: "Switch AI model" },
-    { command: "tts", description: "Toggle voice output" },
-    { command: "clear", description: "Fresh session start" },
-    { command: "session", description: "Manage Claude sessions" },
-    { command: "disk", description: "Disk usage" },
-    { command: "memory", description: "Memory usage" },
-    { command: "cpu", description: "CPU info" },
-    { command: "health", description: "System health" },
-    { command: "sh", description: "Execute shell command" },
-    { command: "cd", description: "Change directory" },
-    { command: "ls", description: "List files" },
-    { command: "ping", description: "Latency check" },
-    ]);
+    const defaultCommands = [
+      { command: "start", description: "Open quick actions" },
+      { command: "help", description: "Show all commands" },
+      { command: "model", description: "Switch AI model" },
+      { command: "schedule", description: "View scheduled tasks" },
+      { command: "schedules", description: "List all schedules" },
+      { command: "timer", description: "Quick countdown timer" },
+      { command: "weather", description: "Weather info" },
+      { command: "translate", description: "Translate text" },
+      { command: "clear", description: "Fresh session start" },
+      { command: "session", description: "Manage AI sessions" },
+    ] as const;
+
+    const privateChatCommands = [
+      ...defaultCommands,
+      { command: "tts", description: "Toggle voice output" },
+      { command: "disk", description: "Disk usage" },
+      { command: "memory", description: "Memory usage" },
+      { command: "cpu", description: "CPU info" },
+      { command: "health", description: "System health" },
+      { command: "heartbeat", description: "Proactive monitoring" },
+      { command: "analytics", description: "Usage analytics" },
+      { command: "errors", description: "Recent errors" },
+      { command: "ls", description: "List files" },
+      { command: "pwd", description: "Show working directory" },
+      { command: "ping", description: "Latency check" },
+      { command: "stats", description: "Gateway runtime stats" },
+    ] as const;
+
+    const groupChatCommands = [
+      { command: "help", description: "Show all commands" },
+      { command: "weather", description: "Weather info" },
+      { command: "translate", description: "Translate text" },
+      { command: "model", description: "Switch AI model" },
+      { command: "clear", description: "Fresh session start" },
+    ] as const;
+
+    await bot.api.setMyCommands(defaultCommands);
+    await bot.api.setMyCommands(privateChatCommands, {
+      scope: { type: "all_private_chats" },
+    });
+    await bot.api.setMyCommands(groupChatCommands, {
+      scope: { type: "all_group_chats" },
+    });
+
+    // Improve first-run UX in Telegram with richer bot profile metadata.
+    await bot.api.setMyDescription(
+      "AI Telegram gateway for chat, files, voice, and system workflows."
+    );
+    await bot.api.setMyShortDescription(
+      "Chat with your AI gateway"
+    );
+    await bot.api.setChatMenuButton({
+      menu_button: { type: "commands" },
+    });
   }
 
   // Register callback query handlers

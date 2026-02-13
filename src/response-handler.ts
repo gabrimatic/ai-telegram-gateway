@@ -64,6 +64,33 @@ function toTelegramMarkdown(text: string): string {
   }
 }
 
+function buildReplyOptions(
+  ctx: Context,
+  options?: { quote?: boolean; disableLinkPreview?: boolean }
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {
+    allow_sending_without_reply: true,
+  };
+
+  if (options?.disableLinkPreview !== false) {
+    result.link_preview_options = { is_disabled: true };
+  }
+
+  const msg = ctx.msg as (Context["msg"] & { message_thread_id?: number }) | undefined;
+  if (msg?.message_thread_id) {
+    result.message_thread_id = msg.message_thread_id;
+  }
+
+  if (options?.quote !== false && msg?.message_id) {
+    result.reply_parameters = {
+      message_id: msg.message_id,
+      allow_sending_without_reply: true,
+    };
+  }
+
+  return result;
+}
+
 /**
  * Streaming response handler that edits a single message as chunks arrive
  * Handles typing indicator refresh, throttled edits, and overflow
@@ -79,6 +106,7 @@ export class StreamingResponseHandler {
   private pendingEditTimeout: NodeJS.Timeout | null = null;
   private editInProgress: Promise<void> | null = null;
   private accumulateOnly: boolean = false;
+  private initialReplySent: boolean = false;
 
   // Constants
   private readonly TYPING_INTERVAL_MS = 4000;
@@ -373,13 +401,25 @@ export class StreamingResponseHandler {
 
       // Send as appropriate type based on MIME
       if (isImageMimeType(mimeType)) {
-        await this.ctx.replyWithPhoto(inputFile, { caption: fileRequest.caption });
+        await this.ctx.replyWithPhoto(inputFile, {
+          ...buildReplyOptions(this.ctx, { quote: false }),
+          caption: fileRequest.caption,
+        } as any);
       } else if (isVideoMimeType(mimeType)) {
-        await this.ctx.replyWithVideo(inputFile, { caption: fileRequest.caption });
+        await this.ctx.replyWithVideo(inputFile, {
+          ...buildReplyOptions(this.ctx, { quote: false }),
+          caption: fileRequest.caption,
+        } as any);
       } else if (isAudioMimeType(mimeType)) {
-        await this.ctx.replyWithAudio(inputFile, { caption: fileRequest.caption });
+        await this.ctx.replyWithAudio(inputFile, {
+          ...buildReplyOptions(this.ctx, { quote: false }),
+          caption: fileRequest.caption,
+        } as any);
       } else {
-        await this.ctx.replyWithDocument(inputFile, { caption: fileRequest.caption });
+        await this.ctx.replyWithDocument(inputFile, {
+          ...buildReplyOptions(this.ctx, { quote: false }),
+          caption: fileRequest.caption,
+        } as any);
       }
 
       info("streaming", "file_sent", { path: safePath });
@@ -432,13 +472,26 @@ export class StreamingResponseHandler {
   private async sendWithMarkdown(text: string): Promise<{ message_id: number }> {
     const safeText = this.clipForTelegram(text);
     const markdownText = toTelegramMarkdown(safeText);
+    const replyOptions = buildReplyOptions(this.ctx, {
+      quote: !this.initialReplySent,
+      disableLinkPreview: true,
+    });
     try {
       if (markdownText.length <= 4096) {
-        return await this.withRetry(() => this.ctx.reply(markdownText, { parse_mode: "MarkdownV2" }));
+        const sent = await this.withRetry(() => this.ctx.reply(markdownText, {
+          ...replyOptions,
+          parse_mode: "MarkdownV2",
+        } as any));
+        this.initialReplySent = true;
+        return sent;
       }
-      return await this.withRetry(() => this.ctx.reply(safeText));
+      const sent = await this.withRetry(() => this.ctx.reply(safeText, replyOptions as any));
+      this.initialReplySent = true;
+      return sent;
     } catch {
-      return await this.withRetry(() => this.ctx.reply(safeText));
+      const sent = await this.withRetry(() => this.ctx.reply(safeText, replyOptions as any));
+      this.initialReplySent = true;
+      return sent;
     }
   }
 
@@ -448,13 +501,20 @@ export class StreamingResponseHandler {
     const markdownText = toTelegramMarkdown(safeText);
     try {
       if (markdownText.length <= 4096) {
-        await this.withRetry(() => this.ctx.api.editMessageText(chatId, messageId, markdownText, { parse_mode: "MarkdownV2" }));
+        await this.withRetry(() => this.ctx.api.editMessageText(chatId, messageId, markdownText, {
+          parse_mode: "MarkdownV2",
+          link_preview_options: { is_disabled: true },
+        } as any));
       } else {
-        await this.withRetry(() => this.ctx.api.editMessageText(chatId, messageId, safeText));
+        await this.withRetry(() => this.ctx.api.editMessageText(chatId, messageId, safeText, {
+          link_preview_options: { is_disabled: true },
+        } as any));
       }
     } catch {
       try {
-        await this.ctx.api.editMessageText(chatId, messageId, safeText);
+        await this.ctx.api.editMessageText(chatId, messageId, safeText, {
+          link_preview_options: { is_disabled: true },
+        } as any);
       } catch {
         // If even plain text edit fails, silently give up (message content was already partially sent)
       }
@@ -501,7 +561,7 @@ export async function sendResponse(
   const { text, includeAudio = false, userId, skipFooter = false } = options;
 
   if (!text || text.trim().length === 0) {
-    await ctx.reply("(empty response)");
+    await ctx.reply("(empty response)", buildReplyOptions(ctx) as any);
     return;
   }
 
@@ -519,7 +579,7 @@ export async function sendResponse(
           error: audioResult.error,
         });
         // Fall back to text if audio generation fails
-        await ctx.reply(`[Voice unavailable] ${text}`);
+        await ctx.reply(`[Voice unavailable] ${text}`, buildReplyOptions(ctx) as any);
         return;
       }
 
@@ -529,7 +589,7 @@ export async function sendResponse(
           userId,
           path: audioResult.audioPath,
         });
-        await ctx.reply(`[Voice unavailable] ${text}`);
+        await ctx.reply(`[Voice unavailable] ${text}`, buildReplyOptions(ctx) as any);
         return;
       }
 
@@ -542,12 +602,14 @@ export async function sendResponse(
 
       const audioFile = new InputFile(audioResult.audioPath, "response.ogg");
       try {
-        await ctx.replyWithAudio(audioFile);
+        await ctx.replyWithChatAction("upload_voice");
+        await ctx.replyWithAudio(audioFile, buildReplyOptions(ctx) as any);
       } catch (audioErr: unknown) {
         if (audioErr instanceof Error && audioErr.message?.includes("VOICE_MESSAGES_FORBIDDEN")) {
           debug("response", "audio_blocked_trying_document", { userId });
           const docFile = new InputFile(audioResult.audioPath, "response.ogg");
-          await ctx.replyWithDocument(docFile);
+          await ctx.replyWithChatAction("upload_document");
+          await ctx.replyWithDocument(docFile, buildReplyOptions(ctx) as any);
         } else {
           throw audioErr;
         }
@@ -569,7 +631,7 @@ export async function sendResponse(
       const errorMsg = err instanceof Error ? err.message : String(err);
       logError("response", "audio_send_failed", { userId, error: errorMsg });
       // Fall back to text
-      await ctx.reply(`[Voice unavailable] ${text}`);
+      await ctx.reply(`[Voice unavailable] ${text}`, buildReplyOptions(ctx) as any);
       return;
     }
   }
@@ -598,21 +660,29 @@ export async function sendResponse(
 
       // Send as appropriate type based on MIME
       if (isImageMimeType(mimeType)) {
+        await ctx.replyWithChatAction("upload_photo");
         await ctx.replyWithPhoto(inputFile, {
+          ...buildReplyOptions(ctx, { quote: false }),
           caption: fileRequest.caption,
-        });
+        } as any);
       } else if (isVideoMimeType(mimeType)) {
+        await ctx.replyWithChatAction("upload_video");
         await ctx.replyWithVideo(inputFile, {
+          ...buildReplyOptions(ctx, { quote: false }),
           caption: fileRequest.caption,
-        });
+        } as any);
       } else if (isAudioMimeType(mimeType)) {
+        await ctx.replyWithChatAction("upload_voice");
         await ctx.replyWithAudio(inputFile, {
+          ...buildReplyOptions(ctx, { quote: false }),
           caption: fileRequest.caption,
-        });
+        } as any);
       } else {
+        await ctx.replyWithChatAction("upload_document");
         await ctx.replyWithDocument(inputFile, {
+          ...buildReplyOptions(ctx, { quote: false }),
           caption: fileRequest.caption,
-        });
+        } as any);
       }
 
       info("response", "file_sent", { path: fileRequest.path, userId });
@@ -628,9 +698,12 @@ export async function sendResponse(
   if (remainingText && remainingText.trim().length > 0) {
     const fullText = skipFooter ? remainingText : remainingText + buildContextFooter();
     try {
-      await ctx.reply(toTelegramMarkdown(fullText), { parse_mode: "MarkdownV2" });
+      await ctx.reply(toTelegramMarkdown(fullText), {
+        ...buildReplyOptions(ctx),
+        parse_mode: "MarkdownV2",
+      } as any);
     } catch {
-      await ctx.reply(fullText);
+      await ctx.reply(fullText, buildReplyOptions(ctx) as any);
     }
   }
 }

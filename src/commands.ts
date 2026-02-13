@@ -70,6 +70,8 @@ import {
   getHeartbeatStatus,
   getHeartbeatMdPath,
   getHeartbeatMdContent,
+  writeHeartbeatMd,
+  createDefaultHeartbeatMd,
 } from "./heartbeat";
 import { env } from "./env";
 
@@ -102,6 +104,74 @@ const ADMIN_ONLY_COMMANDS = new Set([
 
 function dangerousCommandDisabledMessage(): string {
   return `${ICONS.warning} This command is disabled by configuration (TG_ENABLE_DANGEROUS_COMMANDS=false).`;
+}
+
+function sanitizeCodeBlock(text: string): string {
+  return text.replace(/```/g, "\\`\\`\\`");
+}
+
+export function buildHelpKeyboard(isAdmin: boolean): InlineKeyboard {
+  const keyboard = new InlineKeyboard()
+    .text("\u23F1\uFE0F Timer", "timer_menu")
+    .text("\uD83C\uDF24\uFE0F Weather", "weather_menu");
+
+  if (isAdmin) {
+    keyboard
+      .row()
+      .text("\u{1F5A5}\uFE0F Session", "session_status");
+  }
+
+  return keyboard;
+}
+
+export function buildHelpText(options: {
+  providerName: string;
+  isAdmin: boolean;
+  includeDangerousWarning: boolean;
+}): string {
+  const safeProvider = escapeMarkdown(options.providerName);
+  const lines: string[] = [];
+
+  lines.push("\uD83E\uDD16 *Here's what I can do!*");
+  lines.push("");
+
+  if (options.includeDangerousWarning) {
+    lines.push(
+      `\u26A0\uFE0F Dangerous commands are ${env.TG_ENABLE_DANGEROUS_COMMANDS ? "enabled" : "currently disabled by TG_ENABLE_DANGEROUS_COMMANDS=false"}.`
+    );
+    lines.push("");
+  }
+
+  lines.push("\uD83D\uDCCB *PRODUCTIVITY*");
+  lines.push("/schedule /schedules - Manage scheduled tasks");
+  lines.push("/timer - Quick countdown timer");
+  lines.push("/todo /remind - Scheduler-backed productivity helpers");
+  lines.push("");
+  lines.push(`\uD83C\uDF10 *INFO* _(${safeProvider}-powered)_`);
+  lines.push("/weather /define /translate");
+  lines.push("");
+  lines.push("\uD83D\uDCAC *CHAT & SESSION*");
+  lines.push("/start /help /stats /id /version /uptime /ping");
+  lines.push("/model /tts /clear");
+
+  if (options.isAdmin) {
+    lines.push("/session /heartbeat");
+    lines.push("");
+    lines.push("\uD83D\uDDA5 *SERVER (ADMIN)*");
+    lines.push("/pm2 /git /net /sh /ps /kill /top /reboot");
+    lines.push("");
+    lines.push("\uD83D\uDCC1 *FILES (ADMIN)*");
+    lines.push("/cd /ls /pwd /cat /find /size /curl");
+    lines.push("");
+    lines.push("\uD83D\uDCC8 *MONITORING (ADMIN)*");
+    lines.push("/disk /memory /cpu /battery /temp");
+    lines.push("/health /analytics /errors");
+  } else {
+    lines.push("");
+    lines.push("\u{1F512} Admin-only system commands are hidden in this view.");
+  }
+
+  return lines.join("\n");
 }
 
 export async function handleCommand(
@@ -137,56 +207,28 @@ export async function handleCommand(
     // ============ SYSTEM COMMANDS ============
 
     case "start": {
-      const keyboard = new InlineKeyboard()
-        .text("\u23F1\uFE0F Timer", "timer_menu")
-        .text("\uD83C\uDF24\uFE0F Weather", "weather_menu")
+      const safeProviderName = escapeMarkdown(providerName);
+      const keyboard = buildHelpKeyboard(isAdmin)
         .row()
         .text("\u2753 Help", "help_show");
 
       await ctx.reply(
-        `*Hey there! \u{1F44B}\u{2728}*\n\nI'm ${providerName}, running via the AI Telegram Gateway! Here's what I can do:\n\n\u{1F4AC} Chat naturally with me\n\u{1F4CE} Send files (photos, docs, audio)\n\u{1F3A4} Send voice messages (transcribed locally)\n\u{2753} Use /help for all the cool commands\n\nQuick actions:`,
+        `*Hey there! \u{1F44B}\u{2728}*\n\nI'm ${safeProviderName}, running via the AI Telegram Gateway! Here's what I can do:\n\n\u{1F4AC} Chat naturally with me\n\u{1F4CE} Send files (photos, docs, audio)\n\u{1F3A4} Send voice messages (transcribed locally)\n\u{2753} Use /help for all the cool commands\n\nQuick actions:`,
         { parse_mode: "Markdown", reply_markup: keyboard }
       );
       return true;
     }
 
     case "help": {
-      const warningLine = getConfig().security.commandWarningsEnabled
-        ? `\n\u26A0\uFE0F Dangerous admin commands are enabled${env.TG_ENABLE_DANGEROUS_COMMANDS ? "" : " but currently disabled by TG_ENABLE_DANGEROUS_COMMANDS=false"}.\n`
-        : "\n";
-      const helpText = `\uD83E\uDD16 *Here's what I can do!*${warningLine}
-
-\uD83D\uDCCB *PRODUCTIVITY*
-/schedule - Scheduled tasks \u{1F4C5}
-/timer - Quick countdown \u{23F1}\u{FE0F}
-/heartbeat - Proactive monitoring \u{1F493}
-
-\uD83C\uDF10 *INFO* _(${providerName}-powered)_
-/weather /define /translate
-
-\uD83D\uDCBB *SYSTEM & SESSION*
-/model - Switch AI model
-/tts - Toggle voice output \u{1F50A}
-/clear - Fresh start \u{1F9F9}
-/session - Session status & management
-/disk /memory /cpu /battery /temp
-
-\uD83D\uDDA5 *SERVER*
-/pm2 - PM2 process manager
-/git - Git repo status
-/net - Network info
-/sh - Shell access
-/ps /kill /top /reboot
-
-\uD83D\uDCC1 *FILES*
-/cd - Change directory
-/ls /pwd /cat /find /size
-
-\uD83D\uDCC8 *MONITORING*
-/health /analytics /errors
-
-\u2139\uFE0F /help /stats /id /version /uptime /ping`;
-      await ctx.reply(helpText, { parse_mode: "Markdown" });
+      const helpText = buildHelpText({
+        providerName,
+        isAdmin,
+        includeDangerousWarning: getConfig().security.commandWarningsEnabled,
+      });
+      await ctx.reply(helpText, {
+        parse_mode: "Markdown",
+        reply_markup: buildHelpKeyboard(isAdmin),
+      });
       return true;
     }
 
@@ -262,7 +304,7 @@ export async function handleCommand(
       const pingLines = rawPing.split("\n");
       const statsLines = pingLines.filter(l => l.includes("packet loss") || l.includes("min/avg/max") || l.includes("round-trip"));
       const output = statsLines.length > 0 ? statsLines.join("\n") : rawPing;
-      await ctx.reply(`\uD83C\uDF10 Ping ${host}:\n\`\`\`\n${output}\`\`\``, { parse_mode: "Markdown" });
+      await ctx.reply(`\uD83C\uDF10 Ping ${host}:\n\`\`\`\n${sanitizeCodeBlock(output)}\`\`\``, { parse_mode: "Markdown" });
       return true;
     }
 
@@ -490,7 +532,7 @@ export async function handleCommand(
     case "disk": {
       await ctx.replyWithChatAction("typing");
       const output = safeExec("df -h /");
-      await ctx.reply(`\uD83D\uDCBE *Disk Usage:*\n\`\`\`\n${output}\`\`\``, { parse_mode: "Markdown" });
+      await ctx.reply(`\uD83D\uDCBE *Disk Usage:*\n\`\`\`\n${sanitizeCodeBlock(output)}\`\`\``, { parse_mode: "Markdown" });
       return true;
     }
 
@@ -583,7 +625,7 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
         const files = readdirSync(resolvedPath);
         const fileList = files.slice(0, 50).join("\n");
         const truncated = files.length > 50 ? `\n... and ${files.length - 50} more` : "";
-        await ctx.reply(`\uD83D\uDCC1 Files in ${resolvedPath}:\n\`\`\`\n${fileList}${truncated}\`\`\``, { parse_mode: "Markdown" });
+        await ctx.reply(`\uD83D\uDCC1 Files in ${resolvedPath}:\n\`\`\`\n${sanitizeCodeBlock(fileList + truncated)}\`\`\``, { parse_mode: "Markdown" });
       } catch (err) {
         await ctx.reply(`${ICONS.error} ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -610,7 +652,7 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
           ? content.substring(0, 2000) + "\n... (truncated)"
           : content;
         // Escape triple backticks to prevent Markdown parse errors
-        truncated = truncated.replace(/```/g, "\\`\\`\\`");
+        truncated = sanitizeCodeBlock(truncated);
         await ctx.reply(`\uD83D\uDCC4 \`${targetPath}\`\n\`\`\`\n${truncated}\`\`\``, { parse_mode: "Markdown" });
       } catch (err) {
         await ctx.reply(`${ICONS.error} ${err instanceof Error ? err.message : String(err)}`);
@@ -635,7 +677,7 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
       if (!output.trim()) {
         await ctx.reply(`${ICONS.warning} No files found matching "${searchName}"`);
       } else {
-        await ctx.reply(`\uD83D\uDD0D Files matching "${searchName}":\n\`\`\`\n${output}\`\`\``, { parse_mode: "Markdown" });
+        await ctx.reply(`\uD83D\uDD0D Files matching "${searchName}":\n\`\`\`\n${sanitizeCodeBlock(output)}\`\`\``, { parse_mode: "Markdown" });
       }
       return true;
     }
@@ -678,7 +720,7 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
         return true;
       }
       const output = safeExec(`curl -sI --connect-timeout 5 "${url}" 2>&1 | head -20`);
-      await ctx.reply(`\uD83C\uDF10 Headers for ${url}:\n\`\`\`\n${output}\`\`\``, { parse_mode: "Markdown" });
+      await ctx.reply(`\uD83C\uDF10 Headers for ${url}:\n\`\`\`\n${sanitizeCodeBlock(output)}\`\`\``, { parse_mode: "Markdown" });
       return true;
     }
 
@@ -822,13 +864,31 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
         return true;
       }
 
-      if (hbArgs === "edit") {
+      if (hbArgs === "edit" || hbArgs.startsWith("edit ")) {
+        const editText = args.trim().substring(4).trim(); // strip "edit" prefix
+        if (editText) {
+          // Write new content to HEARTBEAT.md
+          writeHeartbeatMd(editText);
+          await ctx.reply(`${ICONS.success} HEARTBEAT.md updated!`);
+          return true;
+        }
+        // No text provided - show current content
         const content = getHeartbeatMdContent();
         if (!content) {
-          await ctx.reply(`No HEARTBEAT.md found at:\n\`${getHeartbeatMdPath()}\`\n\nCreate this file with your checklist items.`, { parse_mode: "Markdown" });
+          await ctx.reply(`No HEARTBEAT.md found.\n\nUse \`/heartbeat create\` to bootstrap one, or \`/heartbeat edit <content>\` to write one.`, { parse_mode: "Markdown" });
         } else {
           const truncated = content.length > 2000 ? content.substring(0, 2000) + "\n...(truncated)" : content;
-          await ctx.reply(`*HEARTBEAT.md*\n\n\`\`\`\n${truncated}\n\`\`\`\n\nEdit at: \`${getHeartbeatMdPath()}\``, { parse_mode: "Markdown" });
+          await ctx.reply(`*HEARTBEAT.md*\n\n\`\`\`\n${sanitizeCodeBlock(truncated)}\n\`\`\`\n\nUpdate with: \`/heartbeat edit <new content>\``, { parse_mode: "Markdown" });
+        }
+        return true;
+      }
+
+      if (hbArgs === "create") {
+        const created = createDefaultHeartbeatMd();
+        if (created) {
+          await ctx.reply(`${ICONS.success} Created default HEARTBEAT.md at \`${getHeartbeatMdPath()}\`\n\nUse \`/heartbeat edit\` to view or modify it.`, { parse_mode: "Markdown" });
+        } else {
+          await ctx.reply(`HEARTBEAT.md already exists. Use \`/heartbeat edit\` to view or update it.`, { parse_mode: "Markdown" });
         }
         return true;
       }
@@ -857,6 +917,8 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
         `/heartbeat off - Stop heartbeat\n` +
         `/heartbeat run - Trigger immediate beat\n` +
         `/heartbeat edit - Show HEARTBEAT.md\n` +
+        `/heartbeat edit <text> - Replace HEARTBEAT.md\n` +
+        `/heartbeat create - Bootstrap default checklist\n` +
         `/heartbeat interval <min> - Change interval`,
         { parse_mode: "Markdown" }
       );
@@ -959,7 +1021,7 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
       if (subArg === "patterns") {
         const patternsText = formatErrorPatterns();
         const recoveryText = formatRecoveryLog();
-        await ctx.reply(`\u{1F50D} *Error Analysis*\n\n\`\`\`\n${patternsText}\n\n${recoveryText}\`\`\``, { parse_mode: "Markdown" });
+        await ctx.reply(`\u{1F50D} *Error Analysis*\n\n\`\`\`\n${sanitizeCodeBlock(`${patternsText}\n\n${recoveryText}`)}\`\`\``, { parse_mode: "Markdown" });
         return true;
       }
 
@@ -998,7 +1060,7 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
       const psFilter = args.trim() || undefined;
       const psOutput = listProcesses(psFilter);
       const psLabel = psFilter ? `Processes matching "${psFilter}"` : "Top processes";
-      await ctx.reply(`\uD83D\uDD0D *${psLabel}*\n\`\`\`\n${psOutput}\`\`\``, { parse_mode: "Markdown" });
+      await ctx.reply(`\uD83D\uDD0D *${psLabel}*\n\`\`\`\n${sanitizeCodeBlock(psOutput)}\`\`\``, { parse_mode: "Markdown" });
       return true;
     }
 
@@ -1015,7 +1077,7 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
       await ctx.replyWithChatAction("typing");
       const procInfo = processDetails(killPid);
       const killResult = killProcess(killPid);
-      await ctx.reply(`\uD83D\uDC80 *Kill PID ${killPid}*\n\`\`\`\n${procInfo}\n${killResult}\`\`\``, { parse_mode: "Markdown" });
+      await ctx.reply(`\uD83D\uDC80 *Kill PID ${killPid}*\n\`\`\`\n${sanitizeCodeBlock(`${procInfo}\n${killResult}`)}\`\`\``, { parse_mode: "Markdown" });
       return true;
     }
 
@@ -1030,25 +1092,25 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
         case "ls":
         case "list": {
           const pmOutput = pm2List();
-          await ctx.reply(`\u2699\uFE0F *PM2 Processes*\n\`\`\`\n${pmOutput}\`\`\``, { parse_mode: "Markdown" });
+          await ctx.reply(`\u2699\uFE0F *PM2 Processes*\n\`\`\`\n${sanitizeCodeBlock(pmOutput)}\`\`\``, { parse_mode: "Markdown" });
           return true;
         }
         case "restart": {
           if (!pmTarget) { await ctx.reply(`\u2139\uFE0F Usage: \`/pm2 restart <name>\``, { parse_mode: "Markdown" }); return true; }
           const pmOutput = pm2Restart(pmTarget);
-          await ctx.reply(`\uD83D\uDD04 PM2 restart:\n\`\`\`\n${pmOutput}\`\`\``, { parse_mode: "Markdown" });
+          await ctx.reply(`\uD83D\uDD04 PM2 restart:\n\`\`\`\n${sanitizeCodeBlock(pmOutput)}\`\`\``, { parse_mode: "Markdown" });
           return true;
         }
         case "stop": {
           if (!pmTarget) { await ctx.reply(`\u2139\uFE0F Usage: \`/pm2 stop <name>\``, { parse_mode: "Markdown" }); return true; }
           const pmOutput = pm2Stop(pmTarget);
-          await ctx.reply(`\u23F9\uFE0F PM2 stop:\n\`\`\`\n${pmOutput}\`\`\``, { parse_mode: "Markdown" });
+          await ctx.reply(`\u23F9\uFE0F PM2 stop:\n\`\`\`\n${sanitizeCodeBlock(pmOutput)}\`\`\``, { parse_mode: "Markdown" });
           return true;
         }
         case "start": {
           if (!pmTarget) { await ctx.reply(`\u2139\uFE0F Usage: \`/pm2 start <name>\``, { parse_mode: "Markdown" }); return true; }
           const pmOutput = pm2Start(pmTarget);
-          await ctx.reply(`\u25B6\uFE0F PM2 start:\n\`\`\`\n${pmOutput}\`\`\``, { parse_mode: "Markdown" });
+          await ctx.reply(`\u25B6\uFE0F PM2 start:\n\`\`\`\n${sanitizeCodeBlock(pmOutput)}\`\`\``, { parse_mode: "Markdown" });
           return true;
         }
         case "logs": {
@@ -1057,7 +1119,7 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
           const pmLines = parseInt(pmLogParts[1], 10) || 30;
           if (!pmName) { await ctx.reply(`\u2139\uFE0F Usage: \`/pm2 logs <name> [lines]\``, { parse_mode: "Markdown" }); return true; }
           const pmOutput = pm2Logs(pmName, pmLines);
-          await ctx.reply(`\uD83D\uDCDC *PM2 logs: ${pmName}*\n\`\`\`\n${pmOutput}\`\`\``, { parse_mode: "Markdown" });
+          await ctx.reply(`\uD83D\uDCDC *PM2 logs: ${pmName}*\n\`\`\`\n${sanitizeCodeBlock(pmOutput)}\`\`\``, { parse_mode: "Markdown" });
           return true;
         }
         case "flush": {
@@ -1088,12 +1150,12 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
       switch (gitSub) {
         case "status": {
           const gitOutput = gitStatus(gitRepo);
-          await ctx.reply(`\uD83D\uDCE6 *Git Status${gitRepo ? `: ${gitRepo}` : ""}*\n\`\`\`\n${gitOutput}\`\`\``, { parse_mode: "Markdown" });
+          await ctx.reply(`\uD83D\uDCE6 *Git Status${gitRepo ? `: ${gitRepo}` : ""}*\n\`\`\`\n${sanitizeCodeBlock(gitOutput)}\`\`\``, { parse_mode: "Markdown" });
           return true;
         }
         case "log": {
           const gitOutput = gitLog(gitRepo);
-          await ctx.reply(`\uD83D\uDCE6 *Git Log${gitRepo ? `: ${gitRepo}` : ""}*\n\`\`\`\n${gitOutput}\`\`\``, { parse_mode: "Markdown" });
+          await ctx.reply(`\uD83D\uDCE6 *Git Log${gitRepo ? `: ${gitRepo}` : ""}*\n\`\`\`\n${sanitizeCodeBlock(gitOutput)}\`\`\``, { parse_mode: "Markdown" });
           return true;
         }
         case "pull": {
@@ -1102,7 +1164,7 @@ Load: ${loadClean}`, { parse_mode: "Markdown" });
             return true;
           }
           const gitOutput = gitPull(gitRepo);
-          await ctx.reply(`\uD83D\uDCE6 *Git Pull${gitRepo ? `: ${gitRepo}` : ""}*\n\`\`\`\n${gitOutput}\`\`\``, { parse_mode: "Markdown" });
+          await ctx.reply(`\uD83D\uDCE6 *Git Pull${gitRepo ? `: ${gitRepo}` : ""}*\n\`\`\`\n${sanitizeCodeBlock(gitOutput)}\`\`\``, { parse_mode: "Markdown" });
           return true;
         }
         default: {
@@ -1126,7 +1188,7 @@ Or pass an absolute path.`, { parse_mode: "Markdown" });
       switch (netSub) {
         case "connections": {
           const netOutput = activeConnections();
-          await ctx.reply(`\uD83C\uDF10 *Active Connections*\n\`\`\`\n${netOutput}\`\`\``, { parse_mode: "Markdown" });
+          await ctx.reply(`\uD83C\uDF10 *Active Connections*\n\`\`\`\n${sanitizeCodeBlock(netOutput)}\`\`\``, { parse_mode: "Markdown" });
           return true;
         }
         case "ip": {
@@ -1137,7 +1199,7 @@ Or pass an absolute path.`, { parse_mode: "Markdown" });
         case "speed": {
           await ctx.reply("\uD83C\uDF10 Running speed test... (this takes ~15s)");
           const netOutput = speedTest();
-          await ctx.reply(`\uD83C\uDF10 *Speed Test*\n\`\`\`\n${netOutput}\`\`\``, { parse_mode: "Markdown" });
+          await ctx.reply(`\uD83C\uDF10 *Speed Test*\n\`\`\`\n${sanitizeCodeBlock(netOutput)}\`\`\``, { parse_mode: "Markdown" });
           return true;
         }
         default: {
@@ -1161,7 +1223,7 @@ Or pass an absolute path.`, { parse_mode: "Markdown" });
     case "top": {
       await ctx.replyWithChatAction("typing");
       const topOutput = safeExec("ps aux -r | head -15 | awk '{printf \"%-12s %5s %5s %s\\n\", $1, $3, $4, $11}'");
-      await ctx.reply(`\u26A1 *Top Processes*\n\`\`\`\n${topOutput}\`\`\``, { parse_mode: "Markdown" });
+      await ctx.reply(`\u26A1 *Top Processes*\n\`\`\`\n${sanitizeCodeBlock(topOutput)}\`\`\``, { parse_mode: "Markdown" });
       return true;
     }
 
@@ -1180,7 +1242,7 @@ Or pass an absolute path.`, { parse_mode: "Markdown" });
       if (!shOutput.trim()) {
         await ctx.reply(`${ICONS.success} Command completed (no output).`);
       } else {
-        await ctx.reply(`\`\`\`\n${shOutput}\`\`\``, { parse_mode: "Markdown" });
+        await ctx.reply(`\`\`\`\n${sanitizeCodeBlock(shOutput)}\`\`\``, { parse_mode: "Markdown" });
       }
       return true;
     }
@@ -1189,6 +1251,11 @@ Or pass an absolute path.`, { parse_mode: "Markdown" });
 
     case "session": {
       const sessionSub = args.trim().toLowerCase();
+      const sessionKeyboard = new InlineKeyboard()
+        .text("\uD83D\uDD04 Refresh", "session_status")
+        .text("\u{1F504} New", "session_new")
+        .row()
+        .text("\u{1F480} Kill", "session_kill");
 
       if (!sessionSub || sessionSub === "status") {
         const sessStats = getAIStats();
@@ -1211,7 +1278,7 @@ Or pass an absolute path.`, { parse_mode: "Markdown" });
         }
 
         sessInfo += `\n\nUse \`/session kill\` or \`/session new\``;
-        await ctx.reply(sessInfo, { parse_mode: "Markdown" });
+        await ctx.reply(sessInfo, { parse_mode: "Markdown", reply_markup: sessionKeyboard });
         return true;
       }
 

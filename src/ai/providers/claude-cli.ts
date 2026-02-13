@@ -125,6 +125,10 @@ class ClaudeSession extends EventEmitter {
 
     debug("claude", "starting_session", { sessionId: this.sessionId, model: this.model });
 
+    const filteredEnv = { ...process.env };
+    delete filteredEnv.CLAUDECODE;
+    delete filteredEnv.CLAUDE_CODE_ENTRYPOINT;
+
     this.proc = spawn(
       claudePath,
       [
@@ -143,6 +147,7 @@ class ClaudeSession extends EventEmitter {
       {
         stdio: ["pipe", "pipe", "pipe"],
         cwd: env.TG_WORKING_DIR,
+        env: filteredEnv,
       }
     );
 

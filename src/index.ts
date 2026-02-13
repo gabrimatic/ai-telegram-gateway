@@ -213,7 +213,7 @@ async function main(): Promise<void> {
   // Initialize heartbeat (proactive monitoring)
   const heartbeatNotifier = async (userId: string, message: string) => {
     try {
-      await bot.api.sendMessage(userId, message, { parse_mode: "Markdown" });
+      await bot.api.sendMessage(userId, message, { parse_mode: "HTML" });
     } catch (err) {
       error("daemon", "heartbeat_notify_failed", {
         userId,

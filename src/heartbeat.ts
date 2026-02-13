@@ -12,7 +12,7 @@
  * whatever model the main session is using.
  */
 
-import { existsSync, readFileSync, mkdirSync } from "fs";
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { runAI } from "./ai";
@@ -24,6 +24,7 @@ import { tryAcquireAISlot, releaseAISlot } from "./poller";
 
 const HEARTBEAT_DIR = join(homedir(), ".claude", "gateway");
 const HEARTBEAT_MD_PATH = join(HEARTBEAT_DIR, "HEARTBEAT.md");
+const HISTORY_PATH = join(HEARTBEAT_DIR, "heartbeat-history.json");
 const ACK_TOKEN = "HEARTBEAT_OK";
 const MAX_HISTORY = 20;
 const BEAT_TIMEOUT_MS = 90_000; // 90s max per beat
@@ -90,22 +91,29 @@ function loadHeartbeatMd(): string | null {
 
 function isAckResponse(response: string): boolean {
   const trimmed = response.trim();
+  const config = getConfig();
+  const maxChars = config.heartbeat?.ackMaxChars ?? 300;
 
-  // Strict: must be exactly the ack token, optionally with minor whitespace/punctuation
-  // e.g. "HEARTBEAT_OK", "HEARTBEAT_OK.", "HEARTBEAT_OK\n"
-  const stripped = trimmed.replace(/[.\s]+$/g, "");
-  return stripped === ACK_TOKEN;
+  // Must start with the ack token
+  if (!trimmed.startsWith(ACK_TOKEN)) return false;
+
+  // If total length is within ackMaxChars, treat as ack
+  // This allows responses like "HEARTBEAT_OK - all systems nominal"
+  return trimmed.length <= maxChars;
 }
 
-function escapeMarkdown(text: string): string {
-  return text.replace(/([_*[\]()~`>#+\-=|{}.!])/g, "\\$1");
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 function buildHeartbeatPrompt(checklistContent: string): string {
   const now = new Date().toISOString();
   return [
     `[HEARTBEAT] This is a scheduled system health check, NOT a user message.`,
-    `Ignore all prior conversation context. Do not reference or continue any previous topics.`,
+    `You may use session context if relevant to the checks below.`,
     `Read the checklist below and execute each item independently.`,
     `If nothing needs attention, reply with exactly: ${ACK_TOKEN}`,
     `Only include findings that represent actual problems right now.`,
@@ -117,11 +125,34 @@ function buildHeartbeatPrompt(checklistContent: string): string {
   ].join("\n");
 }
 
+function loadHistory(): HeartbeatHistoryEntry[] {
+  try {
+    if (existsSync(HISTORY_PATH)) {
+      const data = readFileSync(HISTORY_PATH, "utf-8");
+      const parsed = JSON.parse(data);
+      if (Array.isArray(parsed)) return parsed.slice(-MAX_HISTORY);
+    }
+  } catch {
+    // Corrupted file, start fresh
+  }
+  return [];
+}
+
+function saveHistory(): void {
+  try {
+    ensureDir();
+    writeFileSync(HISTORY_PATH, JSON.stringify(history, null, 2));
+  } catch {
+    // Non-critical, log and continue
+  }
+}
+
 function addHistory(entry: HeartbeatHistoryEntry): void {
   history.push(entry);
   if (history.length > MAX_HISTORY) {
     history = history.slice(-MAX_HISTORY);
   }
+  saveHistory();
 }
 
 /** Run a promise with a timeout. Rejects with Error on timeout. */
@@ -209,9 +240,8 @@ async function runBeat(): Promise<void> {
         const adminId = process.env.TG_ADMIN_ID;
         if (adminId) {
           const icon = "\u{1F493}";
-          // Escape response to prevent Telegram Markdown parse failures
-          const safeResponse = escapeMarkdown(response);
-          await notifyUser(adminId, `${icon} *Heartbeat Alert*\n\n${safeResponse}`).catch((err) => {
+          const safeResponse = escapeHtml(response);
+          await notifyUser(adminId, `${icon} <b>Heartbeat Alert</b>\n\n${safeResponse}`).catch((err) => {
             logError("heartbeat", "notify_failed", {
               error: err instanceof Error ? err.message : String(err),
             });
@@ -246,6 +276,9 @@ export function initHeartbeat(
   ensureDir();
   notifyUser = notifier;
 
+  // Restore persisted history from disk
+  history = loadHistory();
+
   const config = getConfig();
   if (!config.heartbeat?.enabled) {
     info("heartbeat", "disabled_by_config");
@@ -275,6 +308,16 @@ export function startHeartbeat(): void {
 
   // Don't block process exit
   heartbeatInterval.unref();
+
+  // Run first beat after a short delay instead of waiting a full interval
+  const firstBeatTimer = setTimeout(() => {
+    runBeat().catch((err) => {
+      logError("heartbeat", "first_beat_error", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, 5000);
+  firstBeatTimer.unref();
 
   info("heartbeat", "started", {
     intervalMinutes: config.heartbeat?.intervalMinutes ?? 30,
@@ -328,4 +371,30 @@ export function getHeartbeatMdPath(): string {
 
 export function getHeartbeatMdContent(): string | null {
   return loadHeartbeatMd();
+}
+
+export function writeHeartbeatMd(content: string): void {
+  ensureDir();
+  writeFileSync(HEARTBEAT_MD_PATH, content, "utf-8");
+}
+
+const DEFAULT_HEARTBEAT_MD = `# Heartbeat Checklist
+
+## System Health
+- Check disk usage on /. Alert if above 90%.
+- Check memory pressure. Alert if consistently above 95%.
+- Check if any PM2 processes are erroring or stopped.
+
+## Network
+- Verify internet connectivity with a quick DNS lookup.
+
+## Services
+- Confirm the Telegram gateway is responsive (you're running this, so it is).
+`;
+
+export function createDefaultHeartbeatMd(): boolean {
+  if (existsSync(HEARTBEAT_MD_PATH)) return false;
+  ensureDir();
+  writeFileSync(HEARTBEAT_MD_PATH, DEFAULT_HEARTBEAT_MD, "utf-8");
+  return true;
 }

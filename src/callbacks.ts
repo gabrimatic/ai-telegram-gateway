@@ -10,14 +10,35 @@ import { incrementMessages, incrementErrors } from "./health";
 import { recordSuccess, recordFailure } from "./metrics";
 import { buildSystemPrompt, wrapWithSystemPrompt, SessionContext } from "./system-prompt";
 import { loadMemoryContext } from "./memory";
-import { getConfiguredProviderName, getProviderProcessConfig } from "./provider";
+import { getConfiguredProviderName, getProviderDisplayName, getProviderProcessConfig } from "./provider";
 import { ICONS } from "./constants";
 import { formatDuration, formatUptime, safeExec } from "./utils";
 import { loadSchedules, saveSchedules, reloadSchedules } from "./task-scheduler";
 import { env } from "./env";
+import { loadAllowlist, isAdminUser, isUserAllowed } from "./storage";
+import { buildHelpKeyboard, buildHelpText } from "./commands";
+
+async function isAllowedCallbackUser(ctx: CallbackQueryContext<Context>): Promise<boolean> {
+  const userId = ctx.from?.id?.toString();
+  if (!userId) return false;
+  const allowlist = await loadAllowlist();
+  return isUserAllowed(userId, allowlist);
+}
+
+async function isAdminCallbackUser(ctx: CallbackQueryContext<Context>): Promise<boolean> {
+  const userId = ctx.from?.id?.toString();
+  if (!userId) return false;
+  const allowlist = await loadAllowlist();
+  if (!isUserAllowed(userId, allowlist)) return false;
+  return isAdminUser(userId, allowlist);
+}
 
 export async function handleTimerCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
   try {
+    if (!(await isAllowedCallbackUser(ctx))) {
+      await ctx.answerCallbackQuery("Not authorized");
+      return;
+    }
     const match = ctx.callbackQuery.data.match(/^timer_(\d+)$/);
     if (!match) return;
     const seconds = parseInt(match[1], 10);
@@ -55,6 +76,10 @@ export async function handleTimerCallback(ctx: CallbackQueryContext<Context>): P
 }
 
 export async function handleWeatherCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
+  if (!(await isAllowedCallbackUser(ctx))) {
+    await ctx.answerCallbackQuery("Not authorized");
+    return;
+  }
   const city = ctx.callbackQuery.data.replace("weather_", "");
   await ctx.answerCallbackQuery("Fetching weather...");
 
@@ -99,6 +124,10 @@ export async function handleWeatherCallback(ctx: CallbackQueryContext<Context>):
 
 export async function handleTranslateCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
   try {
+    if (!(await isAllowedCallbackUser(ctx))) {
+      await ctx.answerCallbackQuery("Not authorized");
+      return;
+    }
     const lang = ctx.callbackQuery.data.replace("translate_", "");
     await ctx.editMessageText(`Language set to ${lang}. Now use:\n/translate ${lang} [your text]`);
   } catch (err) {
@@ -111,32 +140,20 @@ export async function handleTranslateCallback(ctx: CallbackQueryContext<Context>
 
 export async function handleHelpCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
   try {
-    const helpText = `\uD83E\uDD16 *Bot Commands*
-
-\uD83D\uDCCB *PRODUCTIVITY*
-/schedule - Scheduled tasks
-/timer - Quick countdown
-
-\uD83C\uDF10 *INFO*
-/weather /define /translate
-
-\uD83D\uDCBB *SYSTEM & SESSION*
-/model /tts /clear
-/session - Session status & management
-/disk /memory /cpu /battery /temp
-
-\uD83D\uDDA5 *SERVER*
-/pm2 /git /net /sh
-/ps /kill /top /reboot
-
-\uD83D\uDCC1 *FILES*
-/cd /ls /pwd /cat /find /size
-
-\uD83D\uDCC8 *MONITORING*
-/health /analytics /errors
-
-\u2139\uFE0F /help /stats /id /version /uptime /ping`;
-    await ctx.editMessageText(helpText, { parse_mode: "Markdown" });
+    if (!(await isAllowedCallbackUser(ctx))) {
+      await ctx.answerCallbackQuery("Not authorized");
+      return;
+    }
+    const isAdmin = await isAdminCallbackUser(ctx);
+    const helpText = buildHelpText({
+      providerName: getProviderDisplayName(),
+      isAdmin,
+      includeDangerousWarning: getConfig().security.commandWarningsEnabled,
+    });
+    await ctx.editMessageText(helpText, {
+      parse_mode: "Markdown",
+      reply_markup: buildHelpKeyboard(isAdmin),
+    });
   } catch (err) {
     error("callbacks", "help_callback_failed", {
       error: err instanceof Error ? err.message : String(err),
@@ -147,6 +164,10 @@ export async function handleHelpCallback(ctx: CallbackQueryContext<Context>): Pr
 
 export async function handleWeatherMenuCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
   try {
+    if (!(await isAllowedCallbackUser(ctx))) {
+      await ctx.answerCallbackQuery("Not authorized");
+      return;
+    }
     const keyboard = new InlineKeyboard()
       .text("Berlin", "weather_Berlin")
       .text("London", "weather_London")
@@ -164,6 +185,10 @@ export async function handleWeatherMenuCallback(ctx: CallbackQueryContext<Contex
 
 export async function handleTimerMenuCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
   try {
+    if (!(await isAllowedCallbackUser(ctx))) {
+      await ctx.answerCallbackQuery("Not authorized");
+      return;
+    }
     const keyboard = new InlineKeyboard()
       .text("30s", "timer_30")
       .text("1m", "timer_60")
@@ -182,6 +207,10 @@ export async function handleTimerMenuCallback(ctx: CallbackQueryContext<Context>
 }
 
 export async function handleModelCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
+  if (!(await isAllowedCallbackUser(ctx))) {
+    await ctx.answerCallbackQuery("Not authorized");
+    return;
+  }
   const modelArg = ctx.callbackQuery.data.replace("model_", "") as ModelName;
   const availableModels = getAvailableModels();
 
@@ -216,6 +245,12 @@ export async function handleModelCallback(ctx: CallbackQueryContext<Context>): P
 export async function handleSessionCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
   const action = ctx.callbackQuery.data.replace("session_", "");
   try {
+    const isAdmin = await isAdminCallbackUser(ctx);
+    if (!isAdmin) {
+      await ctx.answerCallbackQuery("Admin-only action");
+      return;
+    }
+
     switch (action) {
       case "status": {
         const stats = getAIStats();
@@ -237,7 +272,15 @@ export async function handleSessionCallback(ctx: CallbackQueryContext<Context>):
           status += `Healthy: ${stats.isHealthy ? ICONS.success : ICONS.error}`;
         }
 
-        await ctx.editMessageText(status, { parse_mode: "Markdown" });
+        const sessionKeyboard = new InlineKeyboard()
+          .text("\uD83D\uDD04 Refresh", "session_status")
+          .text("\u{1F504} New", "session_new")
+          .row()
+          .text("\u{1F480} Kill", "session_kill");
+        await ctx.editMessageText(status, {
+          parse_mode: "Markdown",
+          reply_markup: sessionKeyboard,
+        });
         break;
       }
       case "kill": {
@@ -273,6 +316,11 @@ export async function handleSessionCallback(ctx: CallbackQueryContext<Context>):
 
 export async function handleRebootConfirmCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
   try {
+    const isAdmin = await isAdminCallbackUser(ctx);
+    if (!isAdmin) {
+      await ctx.answerCallbackQuery("Admin-only action");
+      return;
+    }
     if (!env.TG_ENABLE_DANGEROUS_COMMANDS) {
       await ctx.editMessageText(`${ICONS.warning} This operation is disabled by configuration.`);
       await ctx.answerCallbackQuery("Disabled");
@@ -294,6 +342,11 @@ export async function handleRebootConfirmCallback(ctx: CallbackQueryContext<Cont
 
 export async function handleRebootCancelCallback(ctx: CallbackQueryContext<Context>): Promise<void> {
   try {
+    const isAdmin = await isAdminCallbackUser(ctx);
+    if (!isAdmin) {
+      await ctx.answerCallbackQuery("Admin-only action");
+      return;
+    }
     await ctx.editMessageText("\u{274C} Reboot cancelled.");
   } catch (err) {
     error("callbacks", "reboot_cancel_failed", {
@@ -302,4 +355,3 @@ export async function handleRebootCancelCallback(ctx: CallbackQueryContext<Conte
   }
   await ctx.answerCallbackQuery();
 }
-
