@@ -921,8 +921,8 @@ async function handleVoiceMessage(ctx: Context): Promise<void> {
   }, requestId);
 
   try {
-    // Show typing indicator while transcribing
-    await ctx.replyWithChatAction("typing");
+    // Show typing indicator while transcribing (thread-aware in topics).
+    await sendTypingIndicator(ctx);
 
     // Get file URL from Telegram
     const file = await ctx.api.getFile(voice.file_id);

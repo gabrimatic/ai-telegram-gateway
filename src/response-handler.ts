@@ -31,6 +31,30 @@ type MessageWithTopicContext = Context["msg"] & {
   is_topic_message?: boolean;
 };
 
+function getMessageThreadId(ctx: Context): number | undefined {
+  const msg = getTopicMessage(ctx);
+  if (typeof msg?.message_thread_id === "number" && msg.message_thread_id > 0) {
+    return msg.message_thread_id;
+  }
+  return undefined;
+}
+
+async function sendChatActionWithThreadContext(ctx: Context, action: string): Promise<void> {
+  const chatId = ctx.chat?.id;
+  if (chatId === undefined || chatId === null) {
+    return;
+  }
+  const messageThreadId = getMessageThreadId(ctx);
+  const payload: Record<string, unknown> = {
+    chat_id: chatId,
+    action,
+  };
+  if (messageThreadId !== undefined) {
+    payload.message_thread_id = messageThreadId;
+  }
+  await ctx.api.raw.sendChatAction(payload as any);
+}
+
 function getTopicMessage(ctx: Context): MessageWithTopicContext | undefined {
   return ctx.msg as MessageWithTopicContext | undefined;
 }
@@ -172,7 +196,7 @@ export class StreamingResponseHandler {
 
     this.typingInFlight = true;
     try {
-      await this.ctx.replyWithChatAction("typing");
+      await sendChatActionWithThreadContext(this.ctx, "typing");
       this.lastTypingSentAt = Date.now();
     } catch {
       // Ignore failures
@@ -799,13 +823,13 @@ export async function sendResponse(
 
       const audioFile = new InputFile(audioResult.audioPath, "response.ogg");
       try {
-        await ctx.replyWithChatAction("upload_voice");
+        await sendChatActionWithThreadContext(ctx, "upload_voice");
         await ctx.replyWithAudio(audioFile, buildReplyOptions(ctx) as any);
       } catch (audioErr: unknown) {
         if (audioErr instanceof Error && audioErr.message?.includes("VOICE_MESSAGES_FORBIDDEN")) {
           debug("response", "audio_blocked_trying_document", { userId });
           const docFile = new InputFile(audioResult.audioPath, "response.ogg");
-          await ctx.replyWithChatAction("upload_document");
+          await sendChatActionWithThreadContext(ctx, "upload_document");
           await ctx.replyWithDocument(docFile, buildReplyOptions(ctx) as any);
         } else {
           throw audioErr;
@@ -857,25 +881,25 @@ export async function sendResponse(
 
       // Send as appropriate type based on MIME
       if (isImageMimeType(mimeType)) {
-        await ctx.replyWithChatAction("upload_photo");
+        await sendChatActionWithThreadContext(ctx, "upload_photo");
         await ctx.replyWithPhoto(inputFile, {
           ...buildReplyOptions(ctx, { quote: false }),
           caption: fileRequest.caption,
         } as any);
       } else if (isVideoMimeType(mimeType)) {
-        await ctx.replyWithChatAction("upload_video");
+        await sendChatActionWithThreadContext(ctx, "upload_video");
         await ctx.replyWithVideo(inputFile, {
           ...buildReplyOptions(ctx, { quote: false }),
           caption: fileRequest.caption,
         } as any);
       } else if (isAudioMimeType(mimeType)) {
-        await ctx.replyWithChatAction("upload_voice");
+        await sendChatActionWithThreadContext(ctx, "upload_voice");
         await ctx.replyWithAudio(inputFile, {
           ...buildReplyOptions(ctx, { quote: false }),
           caption: fileRequest.caption,
         } as any);
       } else {
-        await ctx.replyWithChatAction("upload_document");
+        await sendChatActionWithThreadContext(ctx, "upload_document");
         await ctx.replyWithDocument(inputFile, {
           ...buildReplyOptions(ctx, { quote: false }),
           caption: fileRequest.caption,
@@ -917,7 +941,7 @@ export async function sendErrorResponse(ctx: Context, error: string, userId?: st
  */
 export async function sendTypingIndicator(ctx: Context): Promise<void> {
   try {
-    await ctx.replyWithChatAction("typing");
+    await sendChatActionWithThreadContext(ctx, "typing");
   } catch {
     // Ignore failures
   }
