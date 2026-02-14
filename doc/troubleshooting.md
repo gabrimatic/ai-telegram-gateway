@@ -82,3 +82,62 @@ Self-heal now has an `auth_required` error type handler that enters degraded mod
 - Auth failures are classified as `auth_required` in error tracking
 - Self-heal pattern recovery for `auth_required` enters degraded mode, never restarts
 - The circuit breaker also prevents repeated failures from hammering the CLI
+
+## Scheduled Prompt Shows `(no output)` or Fast-Fails
+
+**Symptoms:**
+- Schedule history entries fail in under 1 second
+- Result text is `(no output)` or empty for prompt jobs
+- Random check-ins miss expected generated text
+
+**Root cause:**
+Claude CLI stream-json print mode requires `--verbose` with current releases. Without it, the process exits immediately and writes the actual reason to stderr. Older scheduler code could classify this path ambiguously and hide stderr details.
+
+**Fix (already applied):**
+- Scheduler prompt execution now includes `--verbose` with stream-json mode.
+- Scheduler captures bounded stderr and uses it as failure output when model output is empty.
+- Stream-json `result` messages with `is_error: true` are treated as failures.
+- Prompt jobs retry once on fast startup failures with no model output.
+- Random check-ins send a compact fallback nudge if execution fails.
+
+**Verification:**
+1. Run `npm run typecheck && npm run build`
+2. Trigger a prompt schedule and confirm `task_completed ... success:true` in logs for healthy runs
+3. For forced failures, confirm schedule history contains real diagnostics (stderr or structured process-exit reason), not `(no output)`
+
+## Duplicate or Missing Scheduler Runs Around Reload/Restart
+
+**Symptoms:**
+- Same schedule appears to execute twice around reload/restart windows
+- Or a due schedule is active but did not execute
+
+**Current behavior:**
+- Scheduler now uses persisted run leases to enforce at-most-once execution for each due trigger.
+- If a fresh lease exists, concurrent trigger paths skip execution (`task_skipped_lease_active`).
+- If a lease is stale, scheduler recovers it and marks prior run failed before allowing another run.
+
+**Verification:**
+1. Inspect schedule record in `~/.claude/gateway/schedules.json` for lease fields (`runLeaseToken`, timestamps)
+2. Check logs for `task_skipped_lease_active` and `runtime_reconcile`
+3. Confirm stale-lease recovery entries are added to schedule history when applicable
+
+## Task Succeeded But User Did Not Receive Output
+
+**Symptoms:**
+- History shows successful execution, but Telegram/file/email output is missing
+
+**Current behavior:**
+- Execution result and delivery result are tracked separately.
+- Delivery failures are logged as `task_output_delivery_failed`.
+- History appends delivery warnings while preserving execution success semantics.
+
+**Verification:**
+1. Check `task_completed` event for execution status
+2. Check `task_output_delivery_failed` logs for channel-specific errors
+3. Confirm history contains a `Delivery warnings:` block
+
+## Quick Scheduler Health Check
+
+1. Confirm recurring `runtime_reconcile` logs every ~60 seconds
+2. Look for non-zero repair counts in reconcile summaries
+3. If watchdog reports scheduler mismatch repeatedly, confirm reconcile is being triggered and mismatch clears in subsequent cycles

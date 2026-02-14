@@ -26,6 +26,8 @@ Core schedule fields:
 - `status`: `active | completed | cancelled | failed`
 - `userId`
 - timestamps (`createdAt`, `lastRun`, `nextRun`)
+- lease metadata (`runLeaseToken`, `runLeaseStartedAt`, `runLeaseHeartbeatAt`)
+- last failure metadata (`lastFailureKind`, `lastAttemptCount`)
 - `history` with capped entries
 
 History retention:
@@ -46,7 +48,14 @@ Implications:
 
 ## Execution Model
 
-Every trigger calls one dispatcher: `runScheduledTask(schedule)`.
+Every trigger calls one dispatcher: `runScheduledTask(scheduleId)`.
+
+Run coordination:
+
+- Dispatcher rehydrates the latest schedule from store by ID before executing.
+- A persisted run lease is claimed atomically before execution starts.
+- If another process/runtime already owns a fresh lease, the trigger is skipped (`task_skipped_lease_active`).
+- Stale leases are recovered and marked failed before re-execution.
 
 Dispatch by `jobType`:
 
@@ -65,6 +74,11 @@ Important detail:
 
 - Scheduled `prompt` jobs do not use the live main chat session.
 - They run in isolated, fresh provider processes.
+- Scheduler prompt runs use Claude CLI with `--verbose` in stream-json mode and a sanitized child env.
+- Prompt jobs short-circuit while backend auth degraded mode is active.
+- Stream-json `result` messages are not assumed successful; `is_error` responses are classified as failures.
+- Prompt jobs capture bounded stderr for diagnostics and retry once on fast no-output startup failures.
+- Shell/script jobs do not auto-retry by default (non-idempotent safety).
 
 ## Output Routing
 
@@ -81,6 +95,22 @@ Routing behavior:
 - Completion includes success or failure icon and truncated output.
 - Long output is truncated for Telegram display.
 - Random check-in delivery tasks skip start notifications and send only the generated short message.
+- If a random check-in prompt execution fails, users still receive a deterministic fallback nudge while failure remains recorded in history/logs.
+- Delivery failures (Telegram/file/email/tag execution) are recorded as delivery warnings without changing execution success.
+
+## Runtime Reconciler
+
+The scheduler runs a periodic reconciler every 60 seconds.
+
+Per cycle:
+
+- repairs missing cron handlers for active cron schedules
+- repairs missing one-time timers for active once schedules
+- triggers overdue one-time schedules with no timer handle
+- removes orphan runtime handles for non-active schedules
+- recovers stale run leases
+
+Each cycle emits one `runtime_reconcile` event with repair/removal counts.
 
 ## In-Memory Runtime State
 
@@ -138,3 +168,7 @@ Behavior:
 - Treat `email:` output as optional infrastructure, it depends on local `gog` setup.
 - Use `reloadSchedules()` after external edits to `schedules.json`.
 - For incident debugging, inspect per-schedule `history` first, then runtime logs.
+- Quick health check:
+  - Look for recent `runtime_reconcile` logs.
+  - Compare active schedules vs attached runtime handles.
+  - Check for repeated `task_skipped_lease_active` and stale lease recovery messages.

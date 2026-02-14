@@ -24,6 +24,7 @@ This project runs as a long-polling daemon on a trusted host machine. It gives y
 - In-chat schedule manager UI for listing and removing schedules
 - Visual command center (`/menu`) with inline buttons for command groups
 - Predefined random daily check-ins preset (`/schedule checkins`)
+- Random check-ins degrade gracefully with a deterministic fallback nudge on transient prompt failures
 - Admin topic/group controls and generic Telegram API bridge (`/topic`, `/group`, `/tg`)
 - AI-triggered Telegram API calls via `<telegram-api ... />` tags (admin-only, max 20 per response)
 - 80+ slash commands for productivity, system ops, and monitoring
@@ -167,6 +168,17 @@ Notable fields:
 
 Follow-up action buttons (`Again`, `Shorter`, `Deeper`) are model-decided per response using strict JSON schema output from the active provider CLI. If decision fails, the bot fails closed (no prompt-action buttons). `Context` remains available on every response. Typed cues (`again`, `shorter`, `deeper`) remain globally available.
 Hidden actions are enforced server-side, so forged callback payloads are rejected.
+
+### Scheduler reliability notes
+
+- Scheduled prompt jobs run Claude CLI in `--print --input-format stream-json --output-format stream-json --verbose` mode.
+- Scheduler prompt runs sanitize inherited env (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `INIT_CWD`, `PWD`, `OLDPWD` removed) to avoid recursive host-context interference.
+- Prompt failures now capture bounded stderr diagnostics and preserve stream-json error payloads in schedule history.
+- Prompt tasks short-circuit in degraded auth mode and classify backend auth prompts as failures (never as normal success output).
+- Prompt jobs do one immediate retry on fast startup failure with no model output.
+- Scheduler uses persisted run leases (`runLeaseToken`, timestamps) to enforce at-most-once execution per due trigger across reload/restart races.
+- A 60-second runtime reconciler self-heals missing cron/timer handles and recovers stale leases.
+- Execution success and delivery success are tracked separately: delivery failures are logged as warnings without flipping execution outcome.
 
 ## Command groups
 

@@ -13,6 +13,7 @@ import { getErrorRate, getDailyAverageErrorRate } from "./analytics";
 import { runSelfHealingChecks } from "./self-heal";
 import { getConfig } from "./config";
 import { checkAuthStatus, isDegradedMode, enterDegradedMode, exitDegradedMode } from "./ai/auth-check";
+import { getTaskSchedulerHealthSnapshot, triggerTaskSchedulerReconcile } from "./task-scheduler";
 
 const execAsync = promisify(exec);
 
@@ -20,6 +21,7 @@ const WATCHDOG_INTERVAL_MS = 60 * 1000; // 60 seconds
 const ALERT_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes per alert type
 
 let watchdogInterval: NodeJS.Timeout | null = null;
+let schedulerHealthMismatchStreak = 0;
 
 // Alert cooldown tracking (separate from alerting module's throttle)
 const alertCooldowns: Map<string, number> = new Map();
@@ -214,6 +216,42 @@ async function checkAuthHealth(): Promise<void> {
   }
 }
 
+async function checkSchedulerHealth(): Promise<void> {
+  try {
+    const snapshot = getTaskSchedulerHealthSnapshot();
+    const attached = snapshot.attachedCronHandles + snapshot.attachedTimerHandles;
+    const expected = attached + snapshot.leasedSchedules;
+    if (snapshot.activeSchedules > expected) {
+      schedulerHealthMismatchStreak++;
+      warn("watchdog", "scheduler_health_mismatch", {
+        activeSchedules: snapshot.activeSchedules,
+        attachedCronHandles: snapshot.attachedCronHandles,
+        attachedTimerHandles: snapshot.attachedTimerHandles,
+        leasedSchedules: snapshot.leasedSchedules,
+        runningSchedules: snapshot.runningSchedules,
+        mismatchStreak: schedulerHealthMismatchStreak,
+      });
+      triggerTaskSchedulerReconcile();
+
+      if (schedulerHealthMismatchStreak >= 2) {
+        await alertIfNotCooling(
+          "scheduler_health_mismatch",
+          `Scheduler mismatch detected (${schedulerHealthMismatchStreak} consecutive checks). Active=${snapshot.activeSchedules}, attached=${attached}, leased=${snapshot.leasedSchedules}. Reconcile triggered.`,
+          "warning",
+          "consecutive_failures"
+        );
+      }
+      return;
+    }
+
+    schedulerHealthMismatchStreak = 0;
+  } catch (err) {
+    debug("watchdog", "scheduler_health_check_failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 // --- Watchdog cycle ---
 
 let watchdogCycleInProgress = false;
@@ -239,10 +277,11 @@ async function watchdogCycle(): Promise<void> {
       checkNetworkConnectivity(),
       checkErrorRateSpike(),
       checkAuthHealth(),
+      checkSchedulerHealth(),
     ]);
 
     // Log any rejected checks for diagnostics
-    const checkNames = ["disk", "memory", "cpu", "pm2", "docker", "network", "errorRate", "auth"];
+    const checkNames = ["disk", "memory", "cpu", "pm2", "docker", "network", "errorRate", "auth", "scheduler"];
     for (let i = 0; i < results.length; i++) {
       if (results[i].status === "rejected") {
         const reason = (results[i] as PromiseRejectedResult).reason;

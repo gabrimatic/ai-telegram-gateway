@@ -47,6 +47,11 @@ interface Schedule {
   createdAt: string;
   lastRun?: string;
   nextRun?: string;
+  runLeaseToken?: string;
+  runLeaseStartedAt?: string;
+  runLeaseHeartbeatAt?: string;
+  lastFailureKind?: string;
+  lastAttemptCount?: number;
   userId: string;
   history: ScheduleHistoryEntry[];
 }
@@ -160,6 +165,11 @@ function normalizeSchedule(raw: unknown): Schedule | null {
     createdAt: typeof value.createdAt === "string" ? value.createdAt : new Date().toISOString(),
     lastRun: typeof value.lastRun === "string" ? value.lastRun : undefined,
     nextRun: typeof value.nextRun === "string" ? value.nextRun : undefined,
+    runLeaseToken: typeof value.runLeaseToken === "string" ? value.runLeaseToken : undefined,
+    runLeaseStartedAt: typeof value.runLeaseStartedAt === "string" ? value.runLeaseStartedAt : undefined,
+    runLeaseHeartbeatAt: typeof value.runLeaseHeartbeatAt === "string" ? value.runLeaseHeartbeatAt : undefined,
+    lastFailureKind: typeof value.lastFailureKind === "string" ? value.lastFailureKind : undefined,
+    lastAttemptCount: typeof value.lastAttemptCount === "number" ? value.lastAttemptCount : undefined,
     userId: value.userId,
     history: Array.isArray(value.history)
       ? value.history.filter((entry): entry is ScheduleHistoryEntry => (
