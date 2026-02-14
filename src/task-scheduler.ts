@@ -763,6 +763,37 @@ export function regenerateRandomCheckinsForToday(userId: string): RandomCheckinR
   };
 }
 
+function reconcileRandomCheckinsForToday(): void {
+  const store = loadSchedules();
+  const berlinNow = getBerlinDateParts();
+  const dateKey = toBerlinDateKey(berlinNow);
+  const startMinute = (berlinNow.hour * 60) + berlinNow.minute + RANDOM_CHECKIN_MIN_LEAD_MINUTES;
+  const userIds = new Set<string>();
+
+  for (const schedule of store.schedules) {
+    if (schedule.status !== "active") continue;
+    if (!isRandomCheckinMasterTask(schedule.task)) continue;
+    userIds.add(schedule.userId);
+  }
+
+  for (const userId of userIds) {
+    const hasAnyTodayMessage = store.schedules.some((schedule) => {
+      if (schedule.userId !== userId) return false;
+      const payload = parseRandomCheckinTask(schedule.task);
+      return Boolean(payload && payload.dateKey === dateKey);
+    });
+    if (hasAnyTodayMessage) continue;
+
+    const result = generateRandomCheckinsForDate(userId, berlinNow, startMinute);
+    info("task-scheduler", "random_checkins_startup_reconciled", {
+      userId,
+      dateKey,
+      generated: result.generated,
+      reason: result.skippedReason,
+    });
+  }
+}
+
 export function enableRandomCheckins(userId: string): RandomCheckinEnableResult {
   const { master, created } = ensureRandomCheckinMaster(userId);
   const regenerated = regenerateRandomCheckinsForToday(userId);
@@ -1333,6 +1364,21 @@ function scheduleCronTask(schedule: Schedule): void {
       id: schedule.id,
       cron: schedule.cronExpression,
     });
+    mutateSchedules((store) => {
+      const stored = store.schedules.find((s) => s.id === schedule.id);
+      if (!stored || stored.status !== "active") return;
+      stored.status = "failed";
+      stored.nextRun = undefined;
+      stored.history.push({
+        timestamp: new Date().toISOString(),
+        result: `Invalid cron expression: ${schedule.cronExpression}`,
+        duration: 0,
+        success: false,
+      });
+      if (stored.history.length > MAX_HISTORY_PER_SCHEDULE) {
+        stored.history = stored.history.slice(-MAX_HISTORY_PER_SCHEDULE);
+      }
+    });
     return;
   }
 
@@ -1685,6 +1731,7 @@ export function reloadSchedules(): void {
       resumed++;
     }
   }
+  reconcileRandomCheckinsForToday();
   info("task-scheduler", "reloaded", { activeResumed: resumed });
 }
 
@@ -1707,6 +1754,8 @@ export function initTaskScheduler(): void {
       resumed++;
     }
   }
+
+  reconcileRandomCheckinsForToday();
 
   info("task-scheduler", "initialized", {
     totalSchedules: store.schedules.length,
